@@ -31,9 +31,15 @@ $ cx score
 ```
 
 ```
+cx                                            # overview: tree score with per-file
+                                              #   contributions, then the diff score
 cx score [--base <ref>] [--staged] [--json]   # score merge-base..HEAD (or the index)
-cx tree  [--json]                             # absolute C(tree): the trend-line number
+cx tree  [--no-files] [--json]                # absolute C(tree): the trend-line number
 ```
+
+`--no-files` (also on the bare `cx`) suppresses per-file tree
+contributions — and skips computing them, which matters on large trees.
+Tables colorize on a terminal and degrade to plain text when piped.
 
 `--json` emits the full report (per-file scores, skipped files, totals,
 scale factors, compressor version) — the stable contract for tooling.

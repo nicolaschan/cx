@@ -1,7 +1,43 @@
-//! Human-readable rendering. The JSON form is just serde on the report
-//! structs — that serialization is the contract the agent skill consumes.
+//! Human-readable rendering via comfy-table: layout, color, and the
+//! piped-output fallback (styling only applies on a tty) all come from
+//! the library. The JSON form is serde on the report structs — that
+//! serialization is the contract tooling consumes.
+
+use comfy_table::{Cell, CellAlignment, Color, ContentArrangement, Table, presets};
 
 use crate::pipeline::{ScoreReport, TreeReport};
+
+fn table_with_header(columns: &[&str]) -> Table {
+    let mut table = Table::new();
+    table.load_preset(presets::NOTHING);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(columns.iter().map(|c| Cell::new(c).fg(Color::DarkGrey)));
+    table
+}
+
+fn num_cell(text: String, color: Option<Color>) -> Cell {
+    let cell = Cell::new(text).set_alignment(CellAlignment::Right);
+    match color {
+        Some(c) => cell.fg(c),
+        None => cell,
+    }
+}
+
+/// Magnitude coloring shared by both metrics: tiny scores fade, big ones
+/// warn. Negative deltas (removed complexity) are the one good color.
+fn score_color(bytes: f64) -> Option<Color> {
+    if bytes.abs() < 64.0 {
+        Some(Color::DarkGrey)
+    } else if bytes <= -64.0 {
+        Some(Color::Green)
+    } else if bytes >= 4096.0 {
+        Some(Color::Red)
+    } else if bytes >= 1024.0 {
+        Some(Color::Yellow)
+    } else {
+        None
+    }
+}
 
 pub fn render_score(report: &ScoreReport) -> String {
     let mut out = String::new();
@@ -9,32 +45,37 @@ pub fn render_score(report: &ScoreReport) -> String {
         return format!("no scorable changes against {}\n", report.base);
     }
 
-    out.push_str(" REVIEW    ΔCOMPLEX    B/LINE   PATH\n");
+    let mut table = table_with_header(&["REVIEW", "ΔCOMPLEX", "B/LINE", "PATH", ""]);
     for f in &report.files {
-        let annotation = match f.status.as_str() {
-            "modified" => String::new(),
-            s => format!(" ({s})"),
-        };
-        let flag = if f.density_outlier {
-            "  ⚠ density outlier"
+        let mut notes: Vec<String> = Vec::new();
+        if f.status != "modified" {
+            notes.push(format!("({})", f.status));
+        }
+        if f.density_outlier {
+            notes.push("⚠ density outlier".to_owned());
+        }
+        let note_color = if f.density_outlier {
+            Color::Yellow
         } else {
-            ""
+            Color::DarkGrey
         };
-        out.push_str(&format!(
-            " {:>7}  {:>9}  {:>7}   {}{}{}\n",
-            fmt_bytes(f.review_bytes),
-            fmt_signed(f.delta_bytes),
-            f.bytes_per_line
-                .map_or("-".to_owned(), |d| format!("{d:.0}")),
-            f.path,
-            annotation,
-            flag,
-        ));
+        table.add_row(vec![
+            num_cell(fmt_bytes(f.review_bytes), score_color(f.review_bytes)),
+            num_cell(fmt_signed(f.delta_bytes), score_color(f.delta_bytes)),
+            num_cell(
+                f.bytes_per_line
+                    .map_or("-".to_owned(), |d| format!("{d:.0}")),
+                None,
+            ),
+            Cell::new(&f.path),
+            Cell::new(notes.join("  ")).fg(note_color),
+        ]);
     }
+    out.push_str(&table.to_string());
+    out.push('\n');
 
-    out.push_str("──────────────────────────────────────────────\n");
     out.push_str(&format!(
-        " PR total: review {}, Δcomplexity {}\n",
+        "\n PR total: review {}, Δcomplexity {}\n",
         fmt_bytes(report.totals.review_bytes as f64),
         fmt_signed(report.totals.delta_bytes as f64),
     ));
@@ -57,12 +98,10 @@ pub fn render_score(report: &ScoreReport) -> String {
         "noisy — trust totals, not per-file attribution"
     };
     out.push_str(&format!(
-        " attribution scale: {:.2} ({})   zstd {}, level {}, window≤2^{}\n",
+        " attribution scale: {:.2} ({})   {}\n",
         worst_scale,
         verdict,
-        report.version.zstd,
-        report.version.level,
-        report.version.max_window_log,
+        version_line(report),
     ));
     if !report.skipped.is_empty() {
         let list: Vec<String> = report
@@ -76,13 +115,46 @@ pub fn render_score(report: &ScoreReport) -> String {
 }
 
 pub fn render_tree(report: &TreeReport) -> String {
-    format!(
-        "C(tree) = {} over {} files ({} raw)   zstd {}, level {}\n",
+    let mut out = String::new();
+    if !report.files.is_empty() {
+        let mut table = table_with_header(&["BYTES", "SHARE", "LINES", "PATH"]);
+        for f in &report.files {
+            let share = 100.0 * f.bytes / report.compressed_bytes.max(1) as f64;
+            let share_color = (share >= 25.0).then_some(Color::Yellow);
+            table.add_row(vec![
+                num_cell(fmt_bytes(f.bytes), score_color(f.bytes)),
+                num_cell(format!("{share:.1}%"), share_color),
+                num_cell(f.lines.to_string(), None),
+                Cell::new(&f.path),
+            ]);
+        }
+        out.push_str(&table.to_string());
+        out.push_str("\n\n");
+    }
+    out.push_str(&format!(
+        " C(tree) = {} over {} files ({} raw)",
         fmt_bytes(report.compressed_bytes as f64),
-        report.files,
+        report.file_count,
         fmt_bytes(report.raw_bytes as f64),
-        report.version.zstd,
-        report.version.level,
+    ));
+    if report.files.is_empty() {
+        out.push_str(&format!(
+            "   zstd {}, level {}\n",
+            report.version.zstd, report.version.level
+        ));
+    } else {
+        out.push_str(&format!(
+            "\n attribution scale: {:.2}   zstd {}, level {}, window≤2^{}\n",
+            report.scale, report.version.zstd, report.version.level, report.version.max_window_log,
+        ));
+    }
+    out
+}
+
+fn version_line(report: &ScoreReport) -> String {
+    format!(
+        "zstd {}, level {}, window≤2^{}",
+        report.version.zstd, report.version.level, report.version.max_window_log
     )
 }
 

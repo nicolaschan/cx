@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use cx_cli::git::Git;
-use cx_cli::pipeline::{self, ScoreOptions};
+use cx_cli::pipeline::{self, ScoreOptions, TreeOptions};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -150,11 +150,33 @@ fn staged_mode_scores_the_index() {
 }
 
 #[test]
-fn tree_reports_absolute_complexity() {
+fn tree_reports_absolute_complexity_with_contributions() {
     let (_dir, git) = setup();
-    let report = pipeline::tree(&git).unwrap();
+    let report = pipeline::tree(&git, &TreeOptions { with_files: true }).unwrap();
     // keep.rs + moved.rs + novel.rs; Cargo.lock and logo.png excluded.
-    assert_eq!(report.files, 3, "kept files at HEAD");
+    assert_eq!(report.file_count, 3, "kept files at HEAD");
     assert!(report.compressed_bytes > 0);
     assert!(report.compressed_bytes < report.raw_bytes);
+
+    assert_eq!(report.files.len(), 3);
+    let sum: f64 = report.files.iter().map(|f| f.bytes).sum();
+    assert!(
+        (sum - report.compressed_bytes as f64).abs() < 1e-6 * sum,
+        "contributions must sum to C(tree): {sum} vs {}",
+        report.compressed_bytes
+    );
+    assert!(
+        report.files.windows(2).all(|w| w[0].bytes >= w[1].bytes),
+        "contributions must be sorted descending"
+    );
+    assert!(report.files.iter().all(|f| f.lines > 0));
+}
+
+#[test]
+fn tree_contributions_are_suppressable() {
+    let (_dir, git) = setup();
+    let report = pipeline::tree(&git, &TreeOptions { with_files: false }).unwrap();
+    assert_eq!(report.file_count, 3);
+    assert!(report.files.is_empty());
+    assert_eq!(report.scale, 1.0);
 }

@@ -26,16 +26,14 @@ pub struct VersionInfo {
 }
 
 impl VersionInfo {
-    fn current() -> Self {
+    /// Provenance from the scorer that actually produced the numbers —
+    /// never restated by hand.
+    fn for_scorer(scorer: &Scorer) -> Self {
         VersionInfo {
             cx: env!("CARGO_PKG_VERSION"),
             zstd: cx_core::zstd_version(),
-            level: 19,
-            max_window_log: if cfg!(target_pointer_width = "64") {
-                31
-            } else {
-                27
-            },
+            level: scorer.level(),
+            max_window_log: scorer.max_window_log(),
         }
     }
 }
@@ -91,21 +89,52 @@ pub struct ScoreReport {
     pub scales: Scales,
 }
 
+pub struct TreeOptions {
+    /// Compute per-file contributions (the default). Skipping them turns
+    /// the run into a single joint compression — much faster on big trees.
+    pub with_files: bool,
+}
+
+/// One file's contribution to C(tree): its sequential chain-rule score in
+/// sorted-path order, rescaled so contributions sum to the joint total.
+#[derive(Serialize)]
+pub struct TreeFileScore {
+    pub path: String,
+    pub bytes: f64,
+    pub lines: u64,
+}
+
 #[derive(Serialize)]
 pub struct TreeReport {
     pub version: VersionInfo,
     pub rev: String,
-    pub files: usize,
+    pub file_count: usize,
     pub raw_bytes: u64,
     pub compressed_bytes: u64,
+    /// Empty when contributions were suppressed.
+    pub files: Vec<TreeFileScore>,
+    /// Attribution noise gauge for `files`; 1.0 when suppressed.
+    pub scale: f64,
 }
 
 /// One changed file with whichever sides exist and passed the filter.
 struct Item {
     path: String,
-    status: String,
+    status: Status,
     old: Option<Vec<u8>>,
     new: Option<Vec<u8>>,
+}
+
+/// The JSON/status string for a change: "added" | "modified" | "deleted"
+/// | "renamed from <path>". Rendering lives here, at the edge; logic
+/// matches on [`Status`] itself.
+fn status_label(status: &Status) -> String {
+    match status {
+        Status::Added => "added".to_owned(),
+        Status::Modified => "modified".to_owned(),
+        Status::Deleted => "deleted".to_owned(),
+        Status::Renamed { from } => format!("renamed from {from}"),
+    }
 }
 
 pub fn score(git: &Git, opts: &ScoreOptions) -> Result<ScoreReport> {
@@ -205,12 +234,7 @@ pub fn score(git: &Git, opts: &ScoreOptions) -> Result<ScoreReport> {
         }
         items.push(Item {
             path: change.path.clone(),
-            status: match &change.status {
-                Status::Added => "added".to_owned(),
-                Status::Modified => "modified".to_owned(),
-                Status::Deleted => "deleted".to_owned(),
-                Status::Renamed { from } => format!("renamed from {from}"),
-            },
+            status: change.status.clone(),
             old,
             new,
         });
@@ -276,12 +300,12 @@ pub fn score(git: &Git, opts: &ScoreOptions) -> Result<ScoreReport> {
             .unwrap_or(0);
         files.push(FileScore {
             path: item.path.clone(),
-            status: item.status.clone(),
+            status: status_label(&item.status),
             review_bytes,
             review_raw,
             delta_bytes: new_delta - old_delta,
             new_lines,
-            bytes_per_line: (item.status == "added" && new_lines > 0)
+            bytes_per_line: (item.status == Status::Added && new_lines > 0)
                 .then(|| review_bytes / new_lines as f64),
             density_outlier: false,
         });
@@ -290,7 +314,7 @@ pub fn score(git: &Git, opts: &ScoreOptions) -> Result<ScoreReport> {
     files.sort_by(|a, b| b.review_bytes.total_cmp(&a.review_bytes));
 
     Ok(ScoreReport {
-        version: VersionInfo::current(),
+        version: VersionInfo::for_scorer(&scorer),
         base,
         merge_base,
         files,
@@ -307,7 +331,7 @@ pub fn score(git: &Git, opts: &ScoreOptions) -> Result<ScoreReport> {
     })
 }
 
-pub fn tree(git: &Git) -> Result<TreeReport> {
+pub fn tree(git: &Git, opts: &TreeOptions) -> Result<TreeReport> {
     let rev = "HEAD".to_owned();
     let paths = git.ls_tree(&rev)?;
     let specs: Vec<String> = paths.iter().map(|p| format!("{rev}:{p}")).collect();
@@ -318,20 +342,45 @@ pub fn tree(git: &Git) -> Result<TreeReport> {
         .collect();
     let attr_paths: Vec<String> = contents.iter().map(|(p, _)| p.clone()).collect();
     let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?)?;
-    let kept: Vec<&[u8]> = contents
+    let kept: Vec<(&String, &[u8])> = contents
         .iter()
         .filter(|(p, c)| filter.exclusion(p, c).is_none())
-        .map(|(_, c)| c.as_slice())
+        .map(|(p, c)| (p, c.as_slice()))
         .collect();
+    let kept_contents: Vec<&[u8]> = kept.iter().map(|(_, c)| *c).collect();
 
     let scorer = Scorer::default();
-    let blob = scorer.assemble(&kept);
+    let blob = scorer.assemble(&kept_contents);
+    let compressed = scorer.score_absolute(&blob);
+
+    // Per-file contribution: the chain rule over sorted paths against an
+    // empty reference — the same attribution machinery as diff scoring,
+    // with C(tree) itself as the rescale target.
+    let (mut files, scale) = if opts.with_files {
+        let rescaled = rescale(&scorer.score_sequential(&[], &kept_contents), compressed);
+        let files = kept
+            .iter()
+            .zip(&rescaled.scores)
+            .map(|((path, content), score)| TreeFileScore {
+                path: (*path).clone(),
+                bytes: score.rescaled,
+                lines: content.iter().filter(|&&b| b == b'\n').count() as u64,
+            })
+            .collect();
+        (files, rescaled.scale)
+    } else {
+        (Vec::new(), 1.0)
+    };
+    files.sort_by(|a: &TreeFileScore, b: &TreeFileScore| b.bytes.total_cmp(&a.bytes));
+
     Ok(TreeReport {
-        version: VersionInfo::current(),
+        version: VersionInfo::for_scorer(&scorer),
         rev,
-        files: kept.len(),
+        file_count: kept.len(),
         raw_bytes: blob.len() as u64,
-        compressed_bytes: scorer.score_absolute(&blob),
+        compressed_bytes: compressed,
+        files,
+        scale,
     })
 }
 
