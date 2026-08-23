@@ -1,0 +1,9 @@
+[package]
+name = "cx"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "cx"
+repository = "https://github.com/nicolaschan/cx"
+
+[dependencies]
