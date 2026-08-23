@@ -1,0 +1,10 @@
+[package]
+name = "cx-core"
+description = "Compression-based marginal description length scoring engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zstd-safe = { version = "7", features = ["std"] }

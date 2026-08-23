@@ -24,7 +24,7 @@
         };
         cx = rustPlatform.buildRustPackage {
           pname = "cx";
-          version = (pkgs.lib.importTOML ./Cargo.toml).package.version;
+          version = (pkgs.lib.importTOML ./Cargo.toml).workspace.package.version;
           src = pkgs.lib.cleanSource ./.;
           cargoLock.lockFile = ./Cargo.lock;
         };
