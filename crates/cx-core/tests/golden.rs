@@ -17,7 +17,11 @@ const CONVENTIONAL: &[u8] = b"fn div(a: u32, b: u32) -> u32 { a / b }\n";
 
 #[test]
 fn golden_scores() {
-    assert_eq!(zstd_version(), "1.5.7", "zstd changed: re-pin all golden values");
+    assert_eq!(
+        zstd_version(),
+        "1.5.7",
+        "zstd changed: re-pin all golden values"
+    );
     let s = Scorer::default();
 
     assert_eq!(s.score_absolute(REFERENCE), 60);

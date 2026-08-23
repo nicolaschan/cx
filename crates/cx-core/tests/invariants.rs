@@ -40,12 +40,18 @@ fn pure_move_is_free() {
     let old_tree = s.assemble(&[&moved, &other]);
 
     let review = s.score_sequential(&old_tree, &[&moved]);
-    assert!(review[0] < 64, "moving known content should be ≈ free, got {}", review[0]);
+    assert!(
+        review[0] < 64,
+        "moving known content should be ≈ free, got {}",
+        review[0]
+    );
 
+    // Same computation twice: this can only fail on nondeterminism, which
+    // is exactly the property Δ = 0 for pure moves rests on.
     let remainder = s.assemble(&[&other]);
-    let new_side = s.score_sequential(&remainder, &[&moved]);
-    let old_side = s.score_sequential(&remainder, &[&moved]);
-    assert_eq!(new_side, old_side, "identical sides must score identically");
+    let first_run = s.score_sequential(&remainder, &[&moved]);
+    let second_run = s.score_sequential(&remainder, &[&moved]);
+    assert_eq!(first_run, second_run, "scoring must be deterministic");
 }
 
 /// A full rewrite of equal intrinsic complexity: review cost stays high
@@ -90,7 +96,10 @@ fn deletion_refunds() {
     // Remainder still contains two more copies of `dup`.
     let remainder_with_copies = s.assemble(&[&dup, &dup, &other]);
     let refund_dup = s.score_sequential(&remainder_with_copies, &[&dup])[0];
-    assert!(refund_dup < 64, "deleting 1-of-3 copies should refund ≈ 0, got {refund_dup}");
+    assert!(
+        refund_dup < 64,
+        "deleting 1-of-3 copies should refund ≈ 0, got {refund_dup}"
+    );
 
     let remainder_plain = s.assemble(&[&other]);
     let refund_unique = s.score_sequential(&remainder_plain, &[&unique])[0];

@@ -36,14 +36,25 @@ pub struct Rescaled {
     pub scale: f64,
 }
 
-/// Rescale raw sequential scores to sum to the joint total.
+/// Rescale raw sequential scores to sum to the joint total. Degenerate
+/// case: when every raw score is 0 (e.g. all pure moves) there is nothing
+/// to attribute, so rescaled scores stay 0 and scale reads 1.0 even if
+/// the joint is a few overhead bytes — the sum-to-joint property holds
+/// only when something scored.
 pub fn rescale(raw: &[u64], joint: u64) -> Rescaled {
     let sum: u64 = raw.iter().sum();
-    let scale = if sum == 0 { 1.0 } else { joint as f64 / sum as f64 };
+    let scale = if sum == 0 {
+        1.0
+    } else {
+        joint as f64 / sum as f64
+    };
     Rescaled {
         scores: raw
             .iter()
-            .map(|&r| SeqScore { raw: r, rescaled: r as f64 * scale })
+            .map(|&r| SeqScore {
+                raw: r,
+                rescaled: r as f64 * scale,
+            })
             .collect(),
         scale,
     }
@@ -59,13 +70,32 @@ pub struct Scorer {
 
 impl Default for Scorer {
     fn default() -> Self {
-        Self::new(19, if cfg!(target_pointer_width = "64") { 31 } else { 27 })
+        Self::new(
+            19,
+            if cfg!(target_pointer_width = "64") {
+                31
+            } else {
+                27
+            },
+        )
     }
 }
 
 impl Scorer {
+    pub fn level(&self) -> i32 {
+        self.level
+    }
+
+    pub fn max_window_log(&self) -> u32 {
+        self.max_window_log
+    }
+
     pub fn new(level: i32, max_window_log: u32) -> Self {
-        let mut scorer = Scorer { level, max_window_log, empty_frame: 0 };
+        let mut scorer = Scorer {
+            level,
+            max_window_log,
+            empty_frame: 0,
+        };
         scorer.empty_frame = scorer.compressed_size(&[], &[]);
         scorer
     }
@@ -122,14 +152,21 @@ impl Scorer {
             cctx.set_parameter(p).expect("static zstd parameter");
         };
         set(&mut cctx, CParameter::CompressionLevel(self.level));
+        // Determinism by construction, not by libzstd's default: MT zstd
+        // changes output sizes.
+        set(&mut cctx, CParameter::NbWorkers(0));
         set(&mut cctx, CParameter::EnableLongDistanceMatching(true));
-        set(&mut cctx, CParameter::WindowLog(self.window_log(prefix.len() + input.len())));
+        set(
+            &mut cctx,
+            CParameter::WindowLog(self.window_log(prefix.len() + input.len())),
+        );
         // Uniform frame overhead: no stored content size, no checksum,
         // so the empty-frame constant holds for every input size.
         set(&mut cctx, CParameter::ContentSizeFlag(false));
         set(&mut cctx, CParameter::ChecksumFlag(false));
         if !prefix.is_empty() {
-            cctx.ref_prefix(prefix).expect("ref_prefix accepts any bytes");
+            cctx.ref_prefix(prefix)
+                .expect("ref_prefix accepts any bytes");
         }
         let mut out: Vec<u8> = Vec::with_capacity(compress_bound(input.len()));
         let written = cctx
