@@ -41,8 +41,10 @@ impl VersionInfo {
 #[derive(Serialize)]
 pub struct DiffFile {
     pub path: String,
-    /// "added" | "modified" | "deleted" | "renamed from <path>"
-    pub status: String,
+    /// Serializes as "added" | "modified" | "deleted" |
+    /// "renamed from <path>".
+    #[serde(serialize_with = "serialize_status")]
+    pub status: Status,
     /// Metric 1, rescaled: what the reviewer must newly absorb.
     pub review_bytes: f64,
     pub review_raw: u64,
@@ -125,16 +127,15 @@ struct Item {
     new: Option<Vec<u8>>,
 }
 
-/// The JSON/status string for a change: "added" | "modified" | "deleted"
-/// | "renamed from <path>". Rendering lives here, at the edge; logic
-/// matches on [`Status`] itself.
-fn status_label(status: &Status) -> String {
-    match status {
+/// The status stays typed everywhere; this string form exists only at
+/// the JSON edge.
+fn serialize_status<S: serde::Serializer>(status: &Status, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&match status {
         Status::Added => "added".to_owned(),
         Status::Modified => "modified".to_owned(),
         Status::Deleted => "deleted".to_owned(),
         Status::Renamed { from } => format!("renamed from {from}"),
-    }
+    })
 }
 
 pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
@@ -300,7 +301,7 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
             .unwrap_or(0);
         files.push(DiffFile {
             path: item.path.clone(),
-            status: status_label(&item.status),
+            status: item.status.clone(),
             review_bytes,
             review_raw,
             delta_bytes: new_delta - old_delta,

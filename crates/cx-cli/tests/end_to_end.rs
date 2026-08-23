@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use cx_cli::git::Git;
+use cx_cli::git::{Git, Status};
 use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
 
 fn git(dir: &Path, args: &[&str]) {
@@ -86,7 +86,12 @@ fn scores_a_realistic_branch() {
     assert!(novel.delta_bytes > 500.0, "novel logic must add complexity");
 
     let moved = by_path("src/moved.rs");
-    assert_eq!(moved.status, "renamed from src/mover.rs");
+    assert_eq!(
+        moved.status,
+        Status::Renamed {
+            from: "src/mover.rs".into()
+        }
+    );
     assert!(
         moved.review_bytes < 64.0,
         "pure move must be ≈ free to review"
@@ -97,7 +102,7 @@ fn scores_a_realistic_branch() {
     );
 
     let gone = by_path("src/gone.rs");
-    assert_eq!(gone.status, "deleted");
+    assert_eq!(gone.status, Status::Deleted);
     assert!(
         gone.delta_bytes < -500.0,
         "deleting unique content refunds complexity"

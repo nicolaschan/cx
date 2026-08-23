@@ -74,6 +74,16 @@ enum Granularity {
     Hunk,
 }
 
+/// Print a report as pretty JSON or its rendered table.
+fn emit<T: serde::Serialize>(json: bool, value: &T, rendered: String) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    } else {
+        print!("{rendered}");
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let git = Git::discover()?;
@@ -93,16 +103,20 @@ fn main() -> Result<()> {
                     staged: o.staged,
                 },
             )?;
-            if o.json {
-                let combined = serde_json::json!({ "abs": abs, "diff": diff });
-                println!("{}", serde_json::to_string_pretty(&combined)?);
-            } else if o.no_files {
-                print!("{}", report::render_abs(&abs, o.top));
-                println!();
-                print!("{}", report::render_diff(&diff, o.top));
+            let rendered = if o.no_files {
+                format!(
+                    "{}\n{}",
+                    report::render_abs(&abs, o.top),
+                    report::render_diff(&diff, o.top)
+                )
             } else {
-                print!("{}", report::render_overview(&abs, &diff, o.top));
-            }
+                report::render_overview(&abs, &diff, o.top)
+            };
+            emit(
+                o.json,
+                &serde_json::json!({ "abs": abs, "diff": diff }),
+                rendered,
+            )?;
         }
         Some(Cmd::Diff {
             base,
@@ -115,11 +129,7 @@ fn main() -> Result<()> {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
             let report = pipeline::diff(&git, &DiffOptions { base, staged })?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print!("{}", report::render_diff(&report, top));
-            }
+            emit(json, &report, report::render_diff(&report, top))?;
         }
         Some(Cmd::Abs {
             no_files,
@@ -132,11 +142,7 @@ fn main() -> Result<()> {
                     with_files: !no_files,
                 },
             )?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print!("{}", report::render_abs(&report, top));
-            }
+            emit(json, &report, report::render_abs(&report, top))?;
         }
     }
     Ok(())

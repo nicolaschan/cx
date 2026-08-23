@@ -1,22 +1,18 @@
-//! dust-style hierarchical breakdown of per-file tree contributions:
-//! aggregate bytes up the directory tree, keep only the globally biggest
-//! nodes, elide the rest per directory. Display-side only — the JSON
-//! contract stays the full flat file list.
-//!
-//! (dust's own renderer lives inside its binary, not a library; this
-//! mirrors the approach rather than importing it.)
+//! dust-style hierarchical breakdown: aggregate per-file scores up the
+//! directory tree, keep only the globally biggest nodes, elide the rest
+//! per directory. Display-side only — the JSON contract stays the full
+//! flat file list. (dust's own renderer lives inside its binary, not a
+//! library; this mirrors the approach rather than importing it.)
 
 use std::collections::BTreeMap;
 
-/// One path's inputs to the breakdown. `delta` is `Some` only for paths
-/// the diff touched — `None` means "not part of the diff", which is
-/// different from a net delta of zero.
+/// One path's inputs. `delta` is `Some` only for paths the diff touched;
+/// `marker` is the file's status indicator ("+", "−", "→ …").
 pub struct Entry<'a> {
     pub path: &'a str,
     pub bytes: f64,
     pub lines: u64,
     pub delta: Option<f64>,
-    /// Status indicator for this file ("+", "−", "→", …); files only.
     pub marker: Option<String>,
 }
 
@@ -24,42 +20,36 @@ pub struct Node {
     pub name: String,
     pub bytes: f64,
     pub lines: u64,
-    /// Sum of the deltas under this node; `None` when nothing under it
-    /// was touched by the diff.
     pub delta: Option<f64>,
-    /// The file's status indicator; never set on directories.
     pub marker: Option<String>,
     pub is_dir: bool,
-    /// Children that survived pruning, sorted by bytes descending.
+    /// Sorted by bytes descending.
     pub children: Vec<Node>,
-    /// Per-directory summary of pruned children.
-    pub elided_count: usize,
-    pub elided_bytes: f64,
-    pub elided_delta: Option<f64>,
+    /// Summary of this directory's pruned children, if any.
+    pub elided: Option<Elided>,
 }
 
-/// Build the aggregated tree and prune it to (roughly) the `top` biggest
-/// nodes. Because a directory's bytes are the sum of its children's, any
-/// kept node's ancestors are at least as big and therefore also kept —
-/// the tree stays connected by construction. Ties at the threshold keep
-/// slightly more than `top` rather than dropping arbitrarily.
+pub struct Elided {
+    pub count: usize,
+    pub bytes: f64,
+    pub delta: Option<f64>,
+}
+
+/// Build the aggregated tree, pruned to (roughly) the `top` biggest
+/// nodes. A directory's bytes are the sum of its children's, so any kept
+/// node's ancestors are at least as big and also kept — the tree stays
+/// connected by construction. Ties at the threshold keep slightly more
+/// than `top` rather than dropping arbitrarily.
 pub fn breakdown<'a>(entries: impl IntoIterator<Item = Entry<'a>>, top: usize) -> Node {
     let mut root = Builder::default();
     for entry in entries {
-        root.insert(
-            entry.path.split('/'),
-            entry.bytes,
-            entry.lines,
-            entry.delta,
-            entry.marker,
-        );
+        root.insert(entry.path.split('/'), entry);
     }
 
-    let mut sizes: Vec<f64> = Vec::new();
+    let mut sizes = Vec::new();
     root.collect_sizes(&mut sizes);
     sizes.sort_by(|a, b| b.total_cmp(a));
     let threshold = sizes.get(top.saturating_sub(1)).copied().unwrap_or(0.0);
-
     root.into_node(String::new(), threshold)
 }
 
@@ -75,28 +65,21 @@ struct Builder {
 }
 
 impl Builder {
-    fn insert<'a>(
-        &mut self,
-        mut segments: impl Iterator<Item = &'a str>,
-        bytes: f64,
-        lines: u64,
-        delta: Option<f64>,
-        marker: Option<String>,
-    ) {
-        self.bytes += bytes;
-        self.lines += lines;
-        self.delta_sum += delta.unwrap_or(0.0);
-        self.touched |= delta.is_some();
+    fn insert<'a>(&mut self, mut segments: impl Iterator<Item = &'a str>, entry: Entry<'a>) {
+        self.bytes += entry.bytes;
+        self.lines += entry.lines;
+        self.delta_sum += entry.delta.unwrap_or(0.0);
+        self.touched |= entry.delta.is_some();
         match segments.next() {
             None => {
                 self.is_file = true;
-                self.marker = marker;
+                self.marker = entry.marker;
             }
             Some(seg) => self
                 .children
                 .entry(seg.to_owned())
                 .or_default()
-                .insert(segments, bytes, lines, delta, marker),
+                .insert(segments, entry),
         }
     }
 
@@ -109,14 +92,18 @@ impl Builder {
 
     fn into_node(self, name: String, threshold: f64) -> Node {
         let is_dir = !self.children.is_empty();
-        let (kept, elided): (Vec<_>, Vec<_>) = self
+        let (kept, pruned): (Vec<_>, Vec<_>) = self
             .children
             .into_iter()
             .partition(|(_, child)| child.bytes >= threshold);
-        let elided_count = elided.len();
-        let elided_bytes = elided.iter().map(|(_, c)| c.bytes).sum();
-        let elided_touched = elided.iter().any(|(_, c)| c.touched);
-        let elided_delta = elided_touched.then(|| elided.iter().map(|(_, c)| c.delta_sum).sum());
+        let elided = (!pruned.is_empty()).then(|| Elided {
+            count: pruned.len(),
+            bytes: pruned.iter().map(|(_, c)| c.bytes).sum(),
+            delta: pruned
+                .iter()
+                .any(|(_, c)| c.touched)
+                .then(|| pruned.iter().map(|(_, c)| c.delta_sum).sum()),
+        });
         let mut children: Vec<Node> = kept
             .into_iter()
             .map(|(name, child)| child.into_node(name, threshold))
@@ -130,9 +117,7 @@ impl Builder {
             marker: self.marker,
             is_dir,
             children,
-            elided_count,
-            elided_bytes,
-            elided_delta,
+            elided,
         }
     }
 }
@@ -214,9 +199,13 @@ mod tests {
         let big = &root.children[0];
         assert_eq!(big.name, "big");
         assert_eq!(big.children.len(), 1, "only huge.rs survives");
-        assert_eq!(big.elided_count, 2);
-        assert_eq!(big.elided_bytes, 3.0);
-        assert_eq!(root.elided_count, 1, "small.rs elided at root");
+        let elided = big.elided.as_ref().unwrap();
+        assert_eq!((elided.count, elided.bytes), (2, 3.0));
+        assert_eq!(
+            root.elided.as_ref().unwrap().count,
+            1,
+            "small.rs elided at root"
+        );
     }
 
     #[test]
