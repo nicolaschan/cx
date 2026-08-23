@@ -30,6 +30,9 @@ struct OverviewArgs {
     /// Hide per-file contributions in the tree section.
     #[arg(long)]
     no_files: bool,
+    /// Show only the N biggest files/directories in the tree breakdown.
+    #[arg(short = 'n', long, default_value_t = 30)]
+    top: usize,
     #[arg(long)]
     json: bool,
 }
@@ -54,6 +57,9 @@ enum Cmd {
         /// Hide per-file contributions.
         #[arg(long)]
         no_files: bool,
+        /// Show only the N biggest files/directories in the breakdown.
+        #[arg(short = 'n', long, default_value_t = 30)]
+        top: usize,
         #[arg(long)]
         json: bool,
     },
@@ -88,7 +94,7 @@ fn main() -> Result<()> {
                 let combined = serde_json::json!({ "tree": tree, "score": score });
                 println!("{}", serde_json::to_string_pretty(&combined)?);
             } else {
-                print!("{}", report::render_tree(&tree));
+                print!("{}", report::render_tree(&tree, o.top));
                 println!();
                 print!("{}", report::render_score(&score));
             }
@@ -109,7 +115,11 @@ fn main() -> Result<()> {
                 print!("{}", report::render_score(&report));
             }
         }
-        Some(Cmd::Tree { no_files, json }) => {
+        Some(Cmd::Tree {
+            no_files,
+            top,
+            json,
+        }) => {
             let report = pipeline::tree(
                 &git,
                 &TreeOptions {
@@ -119,7 +129,7 @@ fn main() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                print!("{}", report::render_tree(&report));
+                print!("{}", report::render_tree(&report, top));
             }
         }
     }

@@ -11,7 +11,7 @@ Two independent axes per file, one PR total:
 - **REVIEW** — `C(new | old tree)`: what a reviewer who knows the codebase
   must newly absorb. Repo-conventional plumbing compresses to ≈ 0 even when
   it spans hundreds of lines; a dense 60-line contract change does not.
-- **ΔE** — `C(new | remainder) − C(old | remainder)`, where the
+- **ΔC** — `C(new | remainder) − C(old | remainder)`, where the
   remainder is the tree minus all touched content: how much complexity the
   change adds to (or refunds from) the codebase. A full rewrite of equal
   intrinsic complexity scores REVIEW high, Δ ≈ 0. Deleting one of N
@@ -19,27 +19,30 @@ Two independent axes per file, one PR total:
 
 ```console
 $ cx score
- REVIEW    ΔE    B/LINE   PATH
+ REVIEW    ΔC    B/LINE   PATH
   2.0 KB    +2.0 KB       13   crates/cx-core/src/lib.rs (added)
   1.7 KB    +1.7 KB       11   crates/cx-core/tests/invariants.rs (added)
    459 B     +448 B       15   crates/cx-core/tests/golden.rs (added)
       ≈0         ≈0        -   crates/cx-cli/src/main.rs (renamed from src/main.rs)
 ──────────────────────────────────────────────
- PR total: review 4.5 KB, ΔE +4.3 KB
+ PR total: review 4.5 KB, ΔC +4.3 KB
  attribution scale: 0.94 (ok)   zstd 1.5.7, level 19, window≤2^31
  skipped: Cargo.lock (generated/vendored pattern)
 ```
 
 ```
-cx                                            # overview: tree score with per-file
-                                              #   contributions, then the diff score
+cx                                            # overview: tree breakdown, then diff score
 cx score [--base <ref>] [--staged] [--json]   # score merge-base..HEAD (or the index)
-cx tree  [--no-files] [--json]                # absolute C(tree): the trend-line number
+cx tree  [-n <N>] [--no-files] [--json]       # absolute C(tree): the trend-line number
 ```
 
-`--no-files` (also on the bare `cx`) suppresses per-file tree
-contributions — and skips computing them, which matters on large trees.
-Tables colorize on a terminal and degrade to plain text when piped.
+The tree breakdown is dust-style: contributions aggregate up the
+directory tree, only the `-n` globally biggest files/directories are
+shown (default 30), and everything pruned collapses into a per-directory
+`… +N more` row — so the view stays one screen even on repos with
+thousands of files. `--no-files` (also on the bare `cx`) suppresses the
+breakdown and skips computing it entirely. Tables colorize on a terminal
+and degrade to plain text when piped.
 
 `--json` emits the full report (per-file scores, skipped files, totals,
 scale factors, compressor version) — the stable contract for tooling.

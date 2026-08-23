@@ -3,9 +3,83 @@
 //! the library. The JSON form is serde on the report structs — that
 //! serialization is the contract tooling consumes.
 
-use comfy_table::{Cell, CellAlignment, Color, ContentArrangement, Table, presets};
+use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, presets};
 
+use crate::breakdown::{self, Node};
 use crate::pipeline::{ScoreReport, TreeReport};
+
+/// One rendered line of the dust-style tree breakdown.
+struct BreakdownRow {
+    bytes: f64,
+    lines: Option<u64>,
+    label: String,
+    is_dir: bool,
+    is_elision: bool,
+}
+
+impl BreakdownRow {
+    fn into_cells(self, total: f64) -> Vec<Cell> {
+        let share = 100.0 * self.bytes / total;
+        let filled = ((share / 10.0).round() as usize).min(10);
+        let bar = format!(
+            "{}{}  {share:>4.1}%",
+            "█".repeat(filled),
+            "░".repeat(10 - filled)
+        );
+        if self.is_elision {
+            return vec![
+                num_cell(fmt_bytes(self.bytes), Some(Color::DarkGrey)),
+                num_cell("-".to_owned(), Some(Color::DarkGrey)),
+                Cell::new(self.label).fg(Color::DarkGrey),
+                num_cell(bar, Some(Color::DarkGrey)),
+            ];
+        }
+        let path_cell = if self.is_dir {
+            Cell::new(self.label).add_attribute(Attribute::Bold)
+        } else {
+            Cell::new(self.label)
+        };
+        vec![
+            num_cell(fmt_bytes(self.bytes), score_color(self.bytes)),
+            num_cell(self.lines.map_or("-".to_owned(), |l| l.to_string()), None),
+            path_cell,
+            num_cell(bar, (share >= 25.0).then_some(Color::Yellow)),
+        ]
+    }
+}
+
+/// Walk the pruned tree into rows, biggest first within each directory,
+/// with an elision summary as the last child where pruning bit.
+fn collect_rows(node: &Node, prefix: &str, out: &mut Vec<BreakdownRow>) {
+    let child_count = node.children.len() + usize::from(node.elided_count > 0);
+    for (i, child) in node.children.iter().enumerate() {
+        let is_last = i + 1 == child_count;
+        let connector = if is_last { "└─" } else { "├─" };
+        let tip = if child.children.is_empty() && child.elided_count == 0 {
+            "─ "
+        } else {
+            "┬ "
+        };
+        out.push(BreakdownRow {
+            bytes: child.bytes,
+            lines: Some(child.lines),
+            label: format!("{prefix}{connector}{tip}{}", child.name),
+            is_dir: child.is_dir,
+            is_elision: false,
+        });
+        let child_prefix = format!("{prefix}{}", if is_last { "  " } else { "│ " });
+        collect_rows(child, &child_prefix, out);
+    }
+    if node.elided_count > 0 {
+        out.push(BreakdownRow {
+            bytes: node.elided_bytes,
+            lines: None,
+            label: format!("{prefix}└── … +{} more", node.elided_count),
+            is_dir: false,
+            is_elision: true,
+        });
+    }
+}
 
 fn table_with_header(columns: &[&str]) -> Table {
     let mut table = Table::new();
@@ -45,7 +119,7 @@ pub fn render_score(report: &ScoreReport) -> String {
         return format!("no scorable changes against {}\n", report.base);
     }
 
-    let mut table = table_with_header(&["REVIEW", "ΔE", "B/LINE", "PATH", ""]);
+    let mut table = table_with_header(&["REVIEW", "ΔC", "B/LINE", "PATH", ""]);
     for f in &report.files {
         let mut notes: Vec<String> = Vec::new();
         if f.status != "modified" {
@@ -75,7 +149,7 @@ pub fn render_score(report: &ScoreReport) -> String {
     out.push('\n');
 
     out.push_str(&format!(
-        "\n PR total: review {}, ΔE {}\n",
+        "\n PR total: review {}, ΔC {}\n",
         fmt_bytes(report.totals.review_bytes as f64),
         fmt_signed(report.totals.delta_bytes as f64),
     ));
@@ -114,19 +188,16 @@ pub fn render_score(report: &ScoreReport) -> String {
     out
 }
 
-pub fn render_tree(report: &TreeReport) -> String {
+pub fn render_tree(report: &TreeReport, top: usize) -> String {
     let mut out = String::new();
     if !report.files.is_empty() {
-        let mut table = table_with_header(&["BYTES", "SHARE", "LINES", "PATH"]);
-        for f in &report.files {
-            let share = 100.0 * f.bytes / report.compressed_bytes.max(1) as f64;
-            let share_color = (share >= 25.0).then_some(Color::Yellow);
-            table.add_row(vec![
-                num_cell(fmt_bytes(f.bytes), score_color(f.bytes)),
-                num_cell(format!("{share:.1}%"), share_color),
-                num_cell(f.lines.to_string(), None),
-                Cell::new(&f.path),
-            ]);
+        let total = report.compressed_bytes.max(1) as f64;
+        let root = breakdown::breakdown(&report.files, top);
+        let mut table = table_with_header(&["BYTES", "LINES", "PATH", "SHARE"]);
+        let mut rows = Vec::new();
+        collect_rows(&root, "", &mut rows);
+        for row in rows {
+            table.add_row(row.into_cells(total));
         }
         out.push_str(&table.to_string());
         out.push_str("\n\n");
