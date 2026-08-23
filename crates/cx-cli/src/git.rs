@@ -115,10 +115,19 @@ impl Git {
         while let Some(status) = it.next() {
             let path = it.next().context("truncated --name-status output")?;
             match status.chars().next().context("empty status")? {
-                'A' | 'C' => changes.push(Change {
+                'A' => changes.push(Change {
                     path,
                     status: Status::Added,
                 }),
+                // A copy carries two paths like a rename; the source stays
+                // in the tree, so only the destination is a change.
+                'C' => {
+                    let to = it.next().context("copy without target path")?;
+                    changes.push(Change {
+                        path: to,
+                        status: Status::Added,
+                    });
+                }
                 'M' | 'T' => changes.push(Change {
                     path,
                     status: Status::Modified,
@@ -141,8 +150,14 @@ impl Git {
     }
 
     /// Bulk-fetch blob contents. Specs are object names (`<rev>:<path>`,
-    /// `:0:<path>`, …); returns None per spec that doesn't resolve.
+    /// `:0:<path>`, …); returns None per spec that doesn't resolve or
+    /// names a non-blob (e.g. a submodule's commit object).
     pub fn blobs(&self, specs: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        // The batch protocol delimits requests with newlines, so a path
+        // containing one would silently resolve wrong objects.
+        if let Some(bad) = specs.iter().find(|s| s.contains('\n')) {
+            bail!("path contains a newline, refusing to score: {bad:?}");
+        }
         let mut child = Command::new("git")
             .current_dir(&self.root)
             .args(["cat-file", "--batch"])
@@ -178,13 +193,23 @@ impl Git {
                 blobs.push(None);
                 continue;
             }
-            let size: usize = header
-                .rsplit(' ')
-                .next()
-                .and_then(|s| s.parse().ok())
-                .with_context(|| format!("unparsable batch header: {header}"))?;
-            blobs.push(Some(rest[..size].to_vec()));
-            rest = &rest[size + 1..]; // content + trailing newline
+            let (kind, size) = {
+                let mut parts = header.rsplit(' ');
+                let size: usize = parts
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .with_context(|| format!("unparsable batch header: {header}"))?;
+                (parts.next().unwrap_or_default().to_owned(), size)
+            };
+            let content = rest
+                .get(..size)
+                .with_context(|| format!("truncated batch content for: {header}"))?;
+            // Only blobs are file content; a gitlink resolves to a commit
+            // object whose text must not leak into references.
+            blobs.push((kind == "blob").then(|| content.to_vec()));
+            rest = rest
+                .get(size + 1..) // content + trailing newline
+                .context("truncated batch trailer")?;
         }
         if blobs.len() != specs.len() {
             bail!(

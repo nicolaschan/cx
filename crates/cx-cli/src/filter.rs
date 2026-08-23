@@ -1,5 +1,5 @@
 //! The file-filtering stack (plan §3, "order matters"):
-//! 1. `.gitattributes` linguist-generated / linguist-vendored
+//! 1. `.gitattributes` linguist-generated / -vendored / -documentation
 //! 2. binary detection on content (UTF-16/32 aware)
 //! 3. ported linguist generated/vendored patterns
 //! 4. `.cxignore`
@@ -71,6 +71,9 @@ impl Filter {
             }
             if a.vendored {
                 return Some("linguist-vendored");
+            }
+            if a.documentation {
+                return Some("linguist-documentation");
             }
         }
         let head = &content[..content.len().min(8192)];
