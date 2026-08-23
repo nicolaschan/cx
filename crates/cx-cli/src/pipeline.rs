@@ -12,7 +12,7 @@ use crate::git::{Git, Status};
 
 const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/master"];
 
-pub struct ScoreOptions {
+pub struct DiffOptions {
     pub base: Option<String>,
     pub staged: bool,
 }
@@ -39,7 +39,7 @@ impl VersionInfo {
 }
 
 #[derive(Serialize)]
-pub struct FileScore {
+pub struct DiffFile {
     pub path: String,
     /// "added" | "modified" | "deleted" | "renamed from <path>"
     pub status: String,
@@ -79,11 +79,11 @@ pub struct Scales {
 }
 
 #[derive(Serialize)]
-pub struct ScoreReport {
+pub struct DiffReport {
     pub version: VersionInfo,
     pub base: String,
     pub merge_base: String,
-    pub files: Vec<FileScore>,
+    pub files: Vec<DiffFile>,
     pub skipped: Vec<Skipped>,
     pub totals: Totals,
     pub scales: Scales,
@@ -137,7 +137,7 @@ fn status_label(status: &Status) -> String {
     }
 }
 
-pub fn score(git: &Git, opts: &ScoreOptions) -> Result<ScoreReport> {
+pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     let base = resolve_base(git, opts.base.as_deref())?;
     let merge_base = git.merge_base(&base, "HEAD")?;
     let changes = git.changes(&merge_base, opts.staged)?;
@@ -298,7 +298,7 @@ pub fn score(git: &Git, opts: &ScoreOptions) -> Result<ScoreReport> {
             .as_ref()
             .map(|c| c.iter().filter(|&&b| b == b'\n').count() as u64)
             .unwrap_or(0);
-        files.push(FileScore {
+        files.push(DiffFile {
             path: item.path.clone(),
             status: status_label(&item.status),
             review_bytes,
@@ -313,7 +313,7 @@ pub fn score(git: &Git, opts: &ScoreOptions) -> Result<ScoreReport> {
     flag_density_outliers(&mut files);
     files.sort_by(|a, b| b.review_bytes.total_cmp(&a.review_bytes));
 
-    Ok(ScoreReport {
+    Ok(DiffReport {
         version: VersionInfo::for_scorer(&scorer),
         base,
         merge_base,
@@ -402,7 +402,7 @@ fn resolve_base(git: &Git, requested: Option<&str>) -> Result<String> {
 /// Layer 5 of the filter stack: flag (never drop) files whose density is
 /// far off this run's median — probable generated/vendored content that
 /// no pattern anticipated.
-fn flag_density_outliers(files: &mut [FileScore]) {
+fn flag_density_outliers(files: &mut [DiffFile]) {
     let mut densities: Vec<f64> = files
         .iter()
         .filter_map(|f| f.bytes_per_line)

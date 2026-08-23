@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use cx_cli::git::Git;
-use cx_cli::pipeline::{self, ScoreOptions, TreeOptions};
+use cx_cli::pipeline::{self, DiffOptions, TreeOptions};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -61,9 +61,9 @@ fn setup() -> (tempfile::TempDir, Git) {
 #[test]
 fn scores_a_realistic_branch() {
     let (_dir, git) = setup();
-    let report = pipeline::score(
+    let report = pipeline::diff(
         &git,
-        &ScoreOptions {
+        &DiffOptions {
             base: None,
             staged: false,
         },
@@ -134,9 +134,9 @@ fn staged_mode_scores_the_index() {
         .status()
         .unwrap();
 
-    let report = pipeline::score(
+    let report = pipeline::diff(
         &git,
-        &ScoreOptions {
+        &DiffOptions {
             base: None,
             staged: true,
         },

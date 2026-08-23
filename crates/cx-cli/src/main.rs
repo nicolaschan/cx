@@ -2,13 +2,13 @@ use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use cx_cli::git::Git;
-use cx_cli::pipeline::{self, ScoreOptions, TreeOptions};
+use cx_cli::pipeline::{self, DiffOptions, TreeOptions};
 use cx_cli::report;
 
-/// Score git diffs by marginal description length: how much new
-/// information a change adds, conditioned on what the codebase already
-/// contains. With no subcommand, shows the tree score (with per-file
-/// contributions) and the diff score.
+/// Score git trees and diffs by marginal description length: how much
+/// new information content adds, conditioned on what the codebase
+/// already contains. With no subcommand, shows one merged breakdown:
+/// the tree's complexity per file/directory plus the diff's ΔC.
 #[derive(Parser)]
 #[command(name = "cx", version)]
 struct Cli {
@@ -21,16 +21,16 @@ struct Cli {
 /// Flags for the default (no-subcommand) overview.
 #[derive(Args)]
 struct OverviewArgs {
-    /// Base ref for the diff section (default: main/master merge-base).
+    /// Base ref for the diff (default: main/master merge-base).
     #[arg(long)]
     base: Option<String>,
-    /// Score the index instead of HEAD in the diff section.
+    /// Diff the index instead of HEAD.
     #[arg(long)]
     staged: bool,
-    /// Hide per-file contributions in the tree section.
+    /// Hide the per-file breakdown; show summary lines only.
     #[arg(long)]
     no_files: bool,
-    /// Show only the N biggest files/directories in the tree breakdown.
+    /// Show only the N biggest files/directories in the breakdown.
     #[arg(short = 'n', long, default_value_t = 30)]
     top: usize,
     #[arg(long)]
@@ -40,15 +40,18 @@ struct OverviewArgs {
 #[derive(Subcommand)]
 enum Cmd {
     /// Score the changes between a base branch and HEAD (or the index).
-    Score {
+    Diff {
         /// Base ref to diff against (default: main/master merge-base).
         #[arg(long)]
         base: Option<String>,
-        /// Score the index instead of HEAD.
+        /// Diff the index instead of HEAD.
         #[arg(long)]
         staged: bool,
         #[arg(long, value_enum, default_value = "file")]
         granularity: Granularity,
+        /// Show only the N biggest files/directories in the breakdown.
+        #[arg(short = 'n', long, default_value_t = 30)]
+        top: usize,
         #[arg(long)]
         json: bool,
     },
@@ -83,36 +86,39 @@ fn main() -> Result<()> {
                     with_files: !o.no_files,
                 },
             )?;
-            let score = pipeline::score(
+            let diff = pipeline::diff(
                 &git,
-                &ScoreOptions {
+                &DiffOptions {
                     base: o.base,
                     staged: o.staged,
                 },
             )?;
             if o.json {
-                let combined = serde_json::json!({ "tree": tree, "score": score });
+                let combined = serde_json::json!({ "tree": tree, "diff": diff });
                 println!("{}", serde_json::to_string_pretty(&combined)?);
-            } else {
+            } else if o.no_files {
                 print!("{}", report::render_tree(&tree, o.top));
                 println!();
-                print!("{}", report::render_score(&score));
+                print!("{}", report::render_diff(&diff, o.top));
+            } else {
+                print!("{}", report::render_overview(&tree, &diff, o.top));
             }
         }
-        Some(Cmd::Score {
+        Some(Cmd::Diff {
             base,
             staged,
             granularity,
+            top,
             json,
         }) => {
             if matches!(granularity, Granularity::Hunk) {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
-            let report = pipeline::score(&git, &ScoreOptions { base, staged })?;
+            let report = pipeline::diff(&git, &DiffOptions { base, staged })?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                print!("{}", report::render_score(&report));
+                print!("{}", report::render_diff(&report, top));
             }
         }
         Some(Cmd::Tree {

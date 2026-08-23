@@ -5,20 +5,37 @@
 
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, presets};
 
-use crate::breakdown::{self, Node};
-use crate::pipeline::{ScoreReport, TreeReport};
+use crate::breakdown::{self, Entry, Node};
+use crate::pipeline::{DiffReport, TreeReport};
 
 /// One rendered line of the dust-style tree breakdown.
 struct BreakdownRow {
     bytes: f64,
+    delta: Option<f64>,
+    marker: Option<String>,
     lines: Option<u64>,
     label: String,
     is_dir: bool,
     is_elision: bool,
 }
 
+/// Diff-status colors follow the universal diff convention.
+fn marker_color(marker: &str) -> Option<Color> {
+    if marker.contains('⚠') {
+        Some(Color::Yellow)
+    } else if marker.starts_with('+') {
+        Some(Color::Green)
+    } else if marker.starts_with('−') {
+        Some(Color::Red)
+    } else if marker.starts_with('→') {
+        Some(Color::Cyan)
+    } else {
+        None
+    }
+}
+
 impl BreakdownRow {
-    fn into_cells(self, total: f64) -> Vec<Cell> {
+    fn into_cells(self, total: f64, show_delta: bool) -> Vec<Cell> {
         let share = 100.0 * self.bytes / total;
         let filled = ((share / 10.0).round() as usize).min(10);
         let bar = format!(
@@ -26,25 +43,36 @@ impl BreakdownRow {
             "█".repeat(filled),
             "░".repeat(10 - filled)
         );
-        if self.is_elision {
-            return vec![
-                num_cell(fmt_bytes(self.bytes), Some(Color::DarkGrey)),
-                num_cell("-".to_owned(), Some(Color::DarkGrey)),
-                Cell::new(self.label).fg(Color::DarkGrey),
-                num_cell(bar, Some(Color::DarkGrey)),
-            ];
-        }
-        let path_cell = if self.is_dir {
+        let dim = self.is_elision.then_some(Color::DarkGrey);
+        let path_cell = if self.is_elision {
+            Cell::new(self.label).fg(Color::DarkGrey)
+        } else if self.is_dir {
             Cell::new(self.label).add_attribute(Attribute::Bold)
         } else {
             Cell::new(self.label)
         };
-        vec![
-            num_cell(fmt_bytes(self.bytes), score_color(self.bytes)),
-            num_cell(self.lines.map_or("-".to_owned(), |l| l.to_string()), None),
+        let mut cells = vec![num_cell(
+            fmt_bytes(self.bytes),
+            dim.or_else(|| score_color(self.bytes)),
+        )];
+        if show_delta {
+            cells.push(self.delta.map_or_else(
+                || Cell::new(""),
+                |d| num_cell(fmt_signed(d), dim.or_else(|| score_color(d))),
+            ));
+            let marker = self.marker.unwrap_or_default();
+            let color = dim.or_else(|| marker_color(&marker));
+            cells.push(match color {
+                Some(c) => Cell::new(marker).fg(c),
+                None => Cell::new(marker),
+            });
+        }
+        cells.extend([
+            num_cell(self.lines.map_or("-".to_owned(), |l| l.to_string()), dim),
             path_cell,
-            num_cell(bar, (share >= 25.0).then_some(Color::Yellow)),
-        ]
+            num_cell(bar, dim.or((share >= 25.0).then_some(Color::Yellow))),
+        ]);
+        cells
     }
 }
 
@@ -62,6 +90,8 @@ fn collect_rows(node: &Node, prefix: &str, out: &mut Vec<BreakdownRow>) {
         };
         out.push(BreakdownRow {
             bytes: child.bytes,
+            delta: child.delta,
+            marker: child.marker.clone(),
             lines: Some(child.lines),
             label: format!("{prefix}{connector}{tip}{}", child.name),
             is_dir: child.is_dir,
@@ -73,12 +103,37 @@ fn collect_rows(node: &Node, prefix: &str, out: &mut Vec<BreakdownRow>) {
     if node.elided_count > 0 {
         out.push(BreakdownRow {
             bytes: node.elided_bytes,
+            delta: node.elided_delta,
+            marker: None,
             lines: None,
             label: format!("{prefix}└── … +{} more", node.elided_count),
             is_dir: false,
             is_elision: true,
         });
     }
+}
+
+/// Render entries as the dust-style table. `bytes_header` names the size
+/// column ("BYTES" for tree contributions, "REVIEW" for diff cost);
+/// `Some` adds the diff columns (ΔC + status marker), `None` omits them.
+fn breakdown_table<'a>(
+    entries: impl IntoIterator<Item = Entry<'a>>,
+    total: f64,
+    top: usize,
+    diff_columns: Option<&'static str>,
+) -> String {
+    let root = breakdown::breakdown(entries, top);
+    let columns: &[&str] = match diff_columns {
+        Some(bytes_header) => &[bytes_header, "ΔC", "", "LINES", "PATH", "SHARE"],
+        None => &["BYTES", "LINES", "PATH", "SHARE"],
+    };
+    let mut table = table_with_header(columns);
+    let mut rows = Vec::new();
+    collect_rows(&root, "", &mut rows);
+    for row in rows {
+        table.add_row(row.into_cells(total, diff_columns.is_some()));
+    }
+    table.to_string()
 }
 
 fn table_with_header(columns: &[&str]) -> Table {
@@ -113,39 +168,41 @@ fn score_color(bytes: f64) -> Option<Color> {
     }
 }
 
-pub fn render_score(report: &ScoreReport) -> String {
+/// Diff-status indicator per the JSON status strings: "+" added,
+/// "−" deleted, "→ <from>" renamed, "⚠" appended for density outliers.
+fn status_marker(file: &crate::pipeline::DiffFile) -> Option<String> {
+    let base = match file.status.as_str() {
+        "added" => Some("+".to_owned()),
+        "deleted" => Some("−".to_owned()),
+        s => s
+            .strip_prefix("renamed from ")
+            .map(|from| format!("→ {from}")),
+    };
+    if file.density_outlier {
+        let base = base.unwrap_or_default();
+        Some(format!("{base} ⚠").trim().to_owned())
+    } else {
+        base
+    }
+}
+
+/// The diff view: same dust-style renderer as the overview, but only the
+/// diff's files — sized by REVIEW cost, with ΔC and status markers.
+pub fn render_diff(report: &DiffReport, top: usize) -> String {
     let mut out = String::new();
     if report.files.is_empty() && report.skipped.is_empty() {
         return format!("no scorable changes against {}\n", report.base);
     }
 
-    let mut table = table_with_header(&["REVIEW", "ΔC", "B/LINE", "PATH", ""]);
-    for f in &report.files {
-        let mut notes: Vec<String> = Vec::new();
-        if f.status != "modified" {
-            notes.push(format!("({})", f.status));
-        }
-        if f.density_outlier {
-            notes.push("⚠ density outlier".to_owned());
-        }
-        let note_color = if f.density_outlier {
-            Color::Yellow
-        } else {
-            Color::DarkGrey
-        };
-        table.add_row(vec![
-            num_cell(fmt_bytes(f.review_bytes), score_color(f.review_bytes)),
-            num_cell(fmt_signed(f.delta_bytes), score_color(f.delta_bytes)),
-            num_cell(
-                f.bytes_per_line
-                    .map_or("-".to_owned(), |d| format!("{d:.0}")),
-                None,
-            ),
-            Cell::new(&f.path),
-            Cell::new(notes.join("  ")).fg(note_color),
-        ]);
-    }
-    out.push_str(&table.to_string());
+    let total = report.totals.review_bytes.max(1) as f64;
+    let entries = report.files.iter().map(|f| Entry {
+        path: &f.path,
+        bytes: f.review_bytes,
+        lines: f.new_lines,
+        delta: Some(f.delta_bytes),
+        marker: status_marker(f),
+    });
+    out.push_str(&breakdown_table(entries, total, top, Some("REVIEW")));
     out.push('\n');
 
     out.push_str(&format!(
@@ -153,28 +210,14 @@ pub fn render_score(report: &ScoreReport) -> String {
         fmt_bytes(report.totals.review_bytes as f64),
         fmt_signed(report.totals.delta_bytes as f64),
     ));
-    let worst_scale = [
-        report.scales.review,
-        report.scales.delta_new,
-        report.scales.delta_old,
-    ]
-    .into_iter()
-    .fold(1.0f64, |acc, s| {
-        if (s - 1.0).abs() > (acc - 1.0).abs() {
-            s
-        } else {
-            acc
-        }
-    });
-    let verdict = if (0.7..=1.1).contains(&worst_scale) {
+    let worst = worst_scale(report, 1.0);
+    let verdict = if (0.7..=1.1).contains(&worst) {
         "ok"
     } else {
         "noisy — trust totals, not per-file attribution"
     };
     out.push_str(&format!(
-        " attribution scale: {:.2} ({})   {}\n",
-        worst_scale,
-        verdict,
+        " attribution scale: {worst:.2} ({verdict})   {}\n",
         version_line(report),
     ));
     if !report.skipped.is_empty() {
@@ -188,18 +231,89 @@ pub fn render_score(report: &ScoreReport) -> String {
     out
 }
 
+/// Entries for the tree-only view: no diff information.
+fn tree_entries(report: &TreeReport) -> impl Iterator<Item = Entry<'_>> {
+    report.files.iter().map(|f| Entry {
+        path: &f.path,
+        bytes: f.bytes,
+        lines: f.lines,
+        delta: None,
+        marker: None,
+    })
+}
+
+/// The default view: one table merging the tree breakdown with the
+/// diff's ΔC per touched path. Deleted files have no tree bytes but
+/// their refunds still aggregate into their directory's ΔC.
+pub fn render_overview(tree: &TreeReport, diff: &DiffReport, top: usize) -> String {
+    let mut changed: std::collections::HashMap<&str, &crate::pipeline::DiffFile> =
+        diff.files.iter().map(|f| (f.path.as_str(), f)).collect();
+    let mut entries: Vec<Entry> = tree
+        .files
+        .iter()
+        .map(|f| {
+            let change = changed.remove(f.path.as_str());
+            Entry {
+                path: &f.path,
+                bytes: f.bytes,
+                lines: f.lines,
+                delta: change.map(|c| c.delta_bytes),
+                marker: change.and_then(status_marker),
+            }
+        })
+        .collect();
+    entries.extend(changed.into_values().map(|c| Entry {
+        path: &c.path,
+        bytes: 0.0,
+        lines: 0,
+        delta: Some(c.delta_bytes),
+        marker: status_marker(c),
+    }));
+
+    let total = tree.compressed_bytes.max(1) as f64;
+    let mut out = breakdown_table(entries, total, top, Some("BYTES"));
+    out.push_str("\n\n");
+    out.push_str(&format!(
+        " C(tree) = {} over {} files ({} raw)\n",
+        fmt_bytes(tree.compressed_bytes as f64),
+        tree.file_count,
+        fmt_bytes(tree.raw_bytes as f64),
+    ));
+    if diff.files.is_empty() && diff.skipped.is_empty() {
+        out.push_str(&format!(" no scorable changes against {}\n", diff.base));
+    } else {
+        out.push_str(&format!(
+            " PR total: review {}, ΔC {}\n",
+            fmt_bytes(diff.totals.review_bytes as f64),
+            fmt_signed(diff.totals.delta_bytes as f64),
+        ));
+    }
+    let worst = worst_scale(diff, tree.scale);
+    let verdict = if (0.7..=1.1).contains(&worst) {
+        "ok"
+    } else {
+        "noisy — trust totals, not per-file attribution"
+    };
+    out.push_str(&format!(
+        " attribution scale: {worst:.2} ({verdict})   {}\n",
+        version_line(diff),
+    ));
+    if !diff.skipped.is_empty() {
+        let list: Vec<String> = diff
+            .skipped
+            .iter()
+            .map(|s| format!("{} ({})", s.path, s.reason))
+            .collect();
+        out.push_str(&format!(" skipped: {}\n", list.join(", ")));
+    }
+    out
+}
+
 pub fn render_tree(report: &TreeReport, top: usize) -> String {
     let mut out = String::new();
     if !report.files.is_empty() {
         let total = report.compressed_bytes.max(1) as f64;
-        let root = breakdown::breakdown(&report.files, top);
-        let mut table = table_with_header(&["BYTES", "LINES", "PATH", "SHARE"]);
-        let mut rows = Vec::new();
-        collect_rows(&root, "", &mut rows);
-        for row in rows {
-            table.add_row(row.into_cells(total));
-        }
-        out.push_str(&table.to_string());
+        out.push_str(&breakdown_table(tree_entries(report), total, top, None));
         out.push_str("\n\n");
     }
     out.push_str(&format!(
@@ -222,7 +336,26 @@ pub fn render_tree(report: &TreeReport, top: usize) -> String {
     out
 }
 
-fn version_line(report: &ScoreReport) -> String {
+/// The scale farthest from 1.0 across the diff's three gauges plus one
+/// extra (the tree's, for the overview; pass 1.0 to ignore).
+fn worst_scale(report: &DiffReport, extra: f64) -> f64 {
+    [
+        report.scales.review,
+        report.scales.delta_new,
+        report.scales.delta_old,
+        extra,
+    ]
+    .into_iter()
+    .fold(1.0f64, |acc, s| {
+        if (s - 1.0).abs() > (acc - 1.0).abs() {
+            s
+        } else {
+            acc
+        }
+    })
+}
+
+fn version_line(report: &DiffReport) -> String {
     format!(
         "zstd {}, level {}, window≤2^{}",
         report.version.zstd, report.version.level, report.version.max_window_log
@@ -254,6 +387,29 @@ fn fmt_signed(bytes: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_markers() {
+        let file = |status: &str, outlier| crate::pipeline::DiffFile {
+            path: "x".into(),
+            status: status.into(),
+            review_bytes: 0.0,
+            review_raw: 0,
+            delta_bytes: 0.0,
+            new_lines: 0,
+            bytes_per_line: None,
+            density_outlier: outlier,
+        };
+        assert_eq!(status_marker(&file("added", false)), Some("+".into()));
+        assert_eq!(status_marker(&file("deleted", false)), Some("−".into()));
+        assert_eq!(
+            status_marker(&file("renamed from a/b.rs", false)),
+            Some("→ a/b.rs".into())
+        );
+        assert_eq!(status_marker(&file("modified", false)), None);
+        assert_eq!(status_marker(&file("modified", true)), Some("⚠".into()));
+        assert_eq!(status_marker(&file("added", true)), Some("+ ⚠".into()));
+    }
 
     #[test]
     fn byte_formatting() {

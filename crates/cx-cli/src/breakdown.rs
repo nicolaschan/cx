@@ -8,18 +8,34 @@
 
 use std::collections::BTreeMap;
 
-use crate::pipeline::TreeFileScore;
+/// One path's inputs to the breakdown. `delta` is `Some` only for paths
+/// the diff touched — `None` means "not part of the diff", which is
+/// different from a net delta of zero.
+pub struct Entry<'a> {
+    pub path: &'a str,
+    pub bytes: f64,
+    pub lines: u64,
+    pub delta: Option<f64>,
+    /// Status indicator for this file ("+", "−", "→", …); files only.
+    pub marker: Option<String>,
+}
 
 pub struct Node {
     pub name: String,
     pub bytes: f64,
     pub lines: u64,
+    /// Sum of the deltas under this node; `None` when nothing under it
+    /// was touched by the diff.
+    pub delta: Option<f64>,
+    /// The file's status indicator; never set on directories.
+    pub marker: Option<String>,
     pub is_dir: bool,
     /// Children that survived pruning, sorted by bytes descending.
     pub children: Vec<Node>,
     /// Per-directory summary of pruned children.
     pub elided_count: usize,
     pub elided_bytes: f64,
+    pub elided_delta: Option<f64>,
 }
 
 /// Build the aggregated tree and prune it to (roughly) the `top` biggest
@@ -27,10 +43,16 @@ pub struct Node {
 /// kept node's ancestors are at least as big and therefore also kept —
 /// the tree stays connected by construction. Ties at the threshold keep
 /// slightly more than `top` rather than dropping arbitrarily.
-pub fn breakdown(files: &[TreeFileScore], top: usize) -> Node {
+pub fn breakdown<'a>(entries: impl IntoIterator<Item = Entry<'a>>, top: usize) -> Node {
     let mut root = Builder::default();
-    for file in files {
-        root.insert(file.path.split('/'), file.bytes, file.lines);
+    for entry in entries {
+        root.insert(
+            entry.path.split('/'),
+            entry.bytes,
+            entry.lines,
+            entry.delta,
+            entry.marker,
+        );
     }
 
     let mut sizes: Vec<f64> = Vec::new();
@@ -45,21 +67,36 @@ pub fn breakdown(files: &[TreeFileScore], top: usize) -> Node {
 struct Builder {
     bytes: f64,
     lines: u64,
+    delta_sum: f64,
+    touched: bool,
+    marker: Option<String>,
     children: BTreeMap<String, Builder>,
     is_file: bool,
 }
 
 impl Builder {
-    fn insert<'a>(&mut self, mut segments: impl Iterator<Item = &'a str>, bytes: f64, lines: u64) {
+    fn insert<'a>(
+        &mut self,
+        mut segments: impl Iterator<Item = &'a str>,
+        bytes: f64,
+        lines: u64,
+        delta: Option<f64>,
+        marker: Option<String>,
+    ) {
         self.bytes += bytes;
         self.lines += lines;
+        self.delta_sum += delta.unwrap_or(0.0);
+        self.touched |= delta.is_some();
         match segments.next() {
-            None => self.is_file = true,
+            None => {
+                self.is_file = true;
+                self.marker = marker;
+            }
             Some(seg) => self
                 .children
                 .entry(seg.to_owned())
                 .or_default()
-                .insert(segments, bytes, lines),
+                .insert(segments, bytes, lines, delta, marker),
         }
     }
 
@@ -78,6 +115,8 @@ impl Builder {
             .partition(|(_, child)| child.bytes >= threshold);
         let elided_count = elided.len();
         let elided_bytes = elided.iter().map(|(_, c)| c.bytes).sum();
+        let elided_touched = elided.iter().any(|(_, c)| c.touched);
+        let elided_delta = elided_touched.then(|| elided.iter().map(|(_, c)| c.delta_sum).sum());
         let mut children: Vec<Node> = kept
             .into_iter()
             .map(|(name, child)| child.into_node(name, threshold))
@@ -87,10 +126,13 @@ impl Builder {
             name,
             bytes: self.bytes,
             lines: self.lines,
+            delta: self.touched.then_some(self.delta_sum),
+            marker: self.marker,
             is_dir,
             children,
             elided_count,
             elided_bytes,
+            elided_delta,
         }
     }
 }
@@ -99,18 +141,20 @@ impl Builder {
 mod tests {
     use super::*;
 
-    fn file(path: &str, bytes: f64, lines: u64) -> TreeFileScore {
-        TreeFileScore {
-            path: path.to_owned(),
+    fn file(path: &'static str, bytes: f64, lines: u64) -> Entry<'static> {
+        Entry {
+            path,
             bytes,
             lines,
+            delta: None,
+            marker: None,
         }
     }
 
     #[test]
     fn aggregates_directories() {
         let root = breakdown(
-            &[
+            [
                 file("src/a.rs", 100.0, 10),
                 file("src/b.rs", 50.0, 5),
                 file("README.md", 25.0, 2),
@@ -130,9 +174,36 @@ mod tests {
     }
 
     #[test]
+    fn aggregates_deltas_only_where_touched() {
+        let touched = |path, bytes, delta| Entry {
+            path,
+            bytes,
+            lines: 1,
+            delta: Some(delta),
+            marker: None,
+        };
+        let root = breakdown(
+            [
+                touched("src/new.rs", 100.0, 80.0),
+                file("src/old.rs", 50.0, 5),
+                touched("src/gone.rs", 0.0, -40.0), // deleted: no tree bytes
+                file("README.md", 25.0, 2),
+            ],
+            100,
+        );
+        let src = &root.children[0];
+        assert_eq!(src.name, "src");
+        assert_eq!(src.delta, Some(40.0), "dir sums deltas incl. deletions");
+        assert_eq!(root.children[1].name, "README.md");
+        assert_eq!(root.children[1].delta, None, "untouched stays None");
+        let gone = src.children.iter().find(|c| c.name == "gone.rs").unwrap();
+        assert_eq!((gone.bytes, gone.delta), (0.0, Some(-40.0)));
+    }
+
+    #[test]
     fn prunes_to_top_nodes_and_elides_the_rest() {
         let root = breakdown(
-            &[
+            [
                 file("big/huge.rs", 1000.0, 1),
                 file("big/tiny1.rs", 1.0, 1),
                 file("big/tiny2.rs", 2.0, 1),
@@ -151,7 +222,7 @@ mod tests {
     #[test]
     fn ancestors_of_kept_nodes_are_kept() {
         let root = breakdown(
-            &[
+            [
                 file("a/b/c/deep.rs", 500.0, 1),
                 file("x.rs", 400.0, 1),
                 file("y.rs", 1.0, 1),
