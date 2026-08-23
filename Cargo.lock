@@ -223,6 +223,7 @@ dependencies = [
  "clap",
  "comfy-table",
  "content_inspector",
+ "crossterm",
  "cx-core",
  "globset",
  "ignore",

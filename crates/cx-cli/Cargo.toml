@@ -14,7 +14,8 @@ path = "src/main.rs"
 cx-core = { path = "../cx-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-comfy-table = "7"
+comfy-table = { version = "7", features = ["reexport_crossterm"] }
+crossterm = { version = "0.29", default-features = false }
 content_inspector = "0.2"
 globset = "0.4"
 ignore = "0.4"
