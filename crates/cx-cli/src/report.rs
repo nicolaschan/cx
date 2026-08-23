@@ -3,7 +3,11 @@
 //! the library. The JSON form is serde on the report structs — that
 //! serialization is the contract tooling consumes.
 
+use std::io::IsTerminal;
+use std::sync::OnceLock;
+
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, presets};
+use crossterm::style::{ResetColor, SetForegroundColor};
 
 use crate::breakdown::{self, Entry, Node};
 use crate::git::Status;
@@ -70,6 +74,31 @@ fn colored(cell: Cell, color: Option<Color>) -> Cell {
         Some(c) => cell.fg(c),
         None => cell,
     }
+}
+
+/// Whether to emit escape sequences, decided exactly as comfy-table
+/// decides it for the tables — so a run either colors everything or
+/// nothing, and piped output stays plain.
+fn styling_enabled() -> bool {
+    static TTY: OnceLock<bool> = OnceLock::new();
+    *TTY.get_or_init(|| std::io::stdout().is_terminal())
+}
+
+/// Color a footer line's fragment. Colors come from the same
+/// `comfy_table::Color` vocabulary the table cells use (the crate
+/// re-exports crossterm's type), so a value means the same thing above
+/// and below the table.
+fn paint(text: impl std::fmt::Display, color: Option<Color>) -> String {
+    match color.filter(|_| styling_enabled()) {
+        Some(c) => format!("{}{text}{}", SetForegroundColor(c), ResetColor),
+        None => text.to_string(),
+    }
+}
+
+/// Provenance and other incidental metadata: present, never competing
+/// with the numbers.
+fn dim(text: impl std::fmt::Display) -> String {
+    paint(text, Some(Color::DarkGrey))
 }
 
 fn num_cell(text: String, color: Option<Color>) -> Cell {
@@ -193,12 +222,17 @@ fn breakdown_table<'a>(
 fn diff_footer(diff: &DiffReport, extra_scale: f64) -> String {
     let mut out = String::new();
     if diff.files.is_empty() && diff.skipped.is_empty() {
-        out.push_str(&format!(" no scorable changes against {}\n", diff.base));
+        out.push_str(&dim(format!(" no scorable changes against {}", diff.base)));
+        out.push('\n');
     } else {
+        // The totals carry the same magnitude coloring as the cells they
+        // sum, so a red total and a red row mean one thing.
+        let review = diff.totals.review_bytes as f64;
+        let delta = diff.totals.delta_bytes as f64;
         out.push_str(&format!(
             " PR total: review {}, ΔC {}\n",
-            fmt_bytes(diff.totals.review_bytes as f64),
-            fmt_signed(diff.totals.delta_bytes as f64),
+            paint(fmt_bytes(review), score_color(review)),
+            paint(fmt_signed(delta), score_color(delta)),
         ));
     }
     let worst = [
@@ -215,14 +249,11 @@ fn diff_footer(diff: &DiffReport, extra_scale: f64) -> String {
             acc
         }
     });
-    let verdict = if (0.7..=1.1).contains(&worst) {
-        "ok"
-    } else {
-        "noisy — trust totals, not per-file attribution"
-    };
     out.push_str(&format!(
-        " attribution scale: {worst:.2} ({verdict})   zstd {}, level {}, window≤2^{}\n",
-        diff.version.zstd, diff.version.level, diff.version.max_window_log,
+        " {} {}   {}\n",
+        dim("attribution scale:"),
+        scale_gauge(worst),
+        provenance_line(&diff.version),
     ));
     if !diff.skipped.is_empty() {
         let list: Vec<String> = diff
@@ -230,17 +261,47 @@ fn diff_footer(diff: &DiffReport, extra_scale: f64) -> String {
             .iter()
             .map(|s| format!("{} ({})", s.path, s.reason))
             .collect();
-        out.push_str(&format!(" skipped: {}\n", list.join(", ")));
+        out.push_str(&dim(format!(" skipped: {}", list.join(", "))));
+        out.push('\n');
     }
     out
 }
 
+/// The attribution noise gauge, colored by whether per-item numbers can
+/// be trusted at all. One definition of "trustworthy" for every view.
+fn scale_gauge(scale: f64) -> String {
+    let trustworthy = (0.7..=1.1).contains(&scale);
+    let (verdict, color) = if trustworthy {
+        ("ok", Color::Green)
+    } else {
+        (
+            "noisy — trust totals, not per-file attribution",
+            Color::Yellow,
+        )
+    };
+    paint(format!("{scale:.2} ({verdict})"), Some(color))
+}
+
+/// Compressor provenance: the scores mean nothing without it, but it
+/// never changes run to run — dim.
+fn provenance_line(version: &crate::pipeline::VersionInfo) -> String {
+    dim(format!(
+        "zstd {}, level {}, window≤2^{}",
+        version.zstd, version.level, version.max_window_log
+    ))
+}
+
+/// C(tree) is a whole-repo absolute, not a change: no magnitude color
+/// (it would sit permanently red), just the count and raw size dimmed.
 fn ctree_line(abs: &AbsReport) -> String {
     format!(
-        " C(tree) = {} over {} files ({} raw)",
+        " C(tree) = {} {}",
         fmt_bytes(abs.compressed_bytes as f64),
-        abs.file_count,
-        fmt_bytes(abs.raw_bytes as f64),
+        dim(format!(
+            "over {} files ({} raw)",
+            abs.file_count,
+            fmt_bytes(abs.raw_bytes as f64),
+        )),
     )
 }
 
@@ -248,7 +309,10 @@ fn ctree_line(abs: &AbsReport) -> String {
 /// diff's files — sized by REVIEW cost, with ΔC and status markers.
 pub fn render_diff(report: &DiffReport, top: usize) -> String {
     if report.files.is_empty() && report.skipped.is_empty() {
-        return format!("no scorable changes against {}\n", report.base);
+        return format!(
+            "{}\n",
+            dim(format!("no scorable changes against {}", report.base))
+        );
     }
     let total = report.totals.review_bytes.max(1) as f64;
     let entries = report
@@ -288,10 +352,9 @@ pub fn render_overview(abs: &AbsReport, diff: &DiffReport, top: usize) -> String
 pub fn render_abs(report: &AbsReport, top: usize) -> String {
     if report.files.is_empty() {
         return format!(
-            "{}   zstd {}, level {}\n",
+            "{}   {}\n",
             ctree_line(report),
-            report.version.zstd,
-            report.version.level
+            provenance_line(&report.version)
         );
     }
     let total = report.compressed_bytes.max(1) as f64;
@@ -301,12 +364,11 @@ pub fn render_abs(report: &AbsReport, top: usize) -> String {
         .map(|f| entry(&f.path, f.bytes, f.lines, None));
     let table = breakdown_table(entries, total, top, None);
     format!(
-        "{table}\n\n{}\n attribution scale: {:.2}   zstd {}, level {}, window≤2^{}\n",
+        "{table}\n\n{}\n {} {}   {}\n",
         ctree_line(report),
-        report.scale,
-        report.version.zstd,
-        report.version.level,
-        report.version.max_window_log,
+        dim("attribution scale:"),
+        scale_gauge(report.scale),
+        provenance_line(&report.version),
     )
 }
 
