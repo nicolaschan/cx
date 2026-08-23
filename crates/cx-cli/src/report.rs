@@ -45,7 +45,7 @@ pub fn render_score(report: &ScoreReport) -> String {
         return format!("no scorable changes against {}\n", report.base);
     }
 
-    let mut table = table_with_header(&["REVIEW", "ΔCOMPLEX", "B/LINE", "PATH", ""]);
+    let mut table = table_with_header(&["REVIEW", "ΔE", "B/LINE", "PATH", ""]);
     for f in &report.files {
         let mut notes: Vec<String> = Vec::new();
         if f.status != "modified" {
@@ -75,7 +75,7 @@ pub fn render_score(report: &ScoreReport) -> String {
     out.push('\n');
 
     out.push_str(&format!(
-        "\n PR total: review {}, Δcomplexity {}\n",
+        "\n PR total: review {}, ΔE {}\n",
         fmt_bytes(report.totals.review_bytes as f64),
         fmt_signed(report.totals.delta_bytes as f64),
     ));

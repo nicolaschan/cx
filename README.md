@@ -11,7 +11,7 @@ Two independent axes per file, one PR total:
 - **REVIEW** — `C(new | old tree)`: what a reviewer who knows the codebase
   must newly absorb. Repo-conventional plumbing compresses to ≈ 0 even when
   it spans hundreds of lines; a dense 60-line contract change does not.
-- **ΔCOMPLEX** — `C(new | remainder) − C(old | remainder)`, where the
+- **ΔE** — `C(new | remainder) − C(old | remainder)`, where the
   remainder is the tree minus all touched content: how much complexity the
   change adds to (or refunds from) the codebase. A full rewrite of equal
   intrinsic complexity scores REVIEW high, Δ ≈ 0. Deleting one of N
@@ -19,13 +19,13 @@ Two independent axes per file, one PR total:
 
 ```console
 $ cx score
- REVIEW    ΔCOMPLEX    B/LINE   PATH
+ REVIEW    ΔE    B/LINE   PATH
   2.0 KB    +2.0 KB       13   crates/cx-core/src/lib.rs (added)
   1.7 KB    +1.7 KB       11   crates/cx-core/tests/invariants.rs (added)
    459 B     +448 B       15   crates/cx-core/tests/golden.rs (added)
       ≈0         ≈0        -   crates/cx-cli/src/main.rs (renamed from src/main.rs)
 ──────────────────────────────────────────────
- PR total: review 4.5 KB, Δcomplexity +4.3 KB
+ PR total: review 4.5 KB, ΔE +4.3 KB
  attribution scale: 0.94 (ok)   zstd 1.5.7, level 19, window≤2^31
  skipped: Cargo.lock (generated/vendored pattern)
 ```
