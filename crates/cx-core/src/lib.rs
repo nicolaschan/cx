@@ -7,6 +7,8 @@
 //! Scores are comparable only within one compressor version + parameter
 //! set. Callers should surface [`zstd_version`] next to any scores.
 
+pub mod testgen;
+
 use zstd_safe::{CCtx, CParameter, compress_bound};
 
 /// Separator inserted between files when assembling references, chosen to
