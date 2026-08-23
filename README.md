@@ -39,7 +39,7 @@ density outliers).
 cx       [-n <N>] [--base <ref>] [--staged]   # overview: one merged table — tree
                                               #   breakdown plus the diff's ΔC per path
 cx diff  [-n <N>] [--base <ref>] [--staged]   # just the diff, sized by review cost
-cx tree  [-n <N>] [--no-files] [--json]       # absolute C(tree): the trend-line number
+cx abs   [-n <N>] [--no-files] [--json]       # absolute C(tree): the trend-line number
 ```
 
 The tree breakdown is dust-style: contributions aggregate up the

@@ -89,7 +89,7 @@ pub struct DiffReport {
     pub scales: Scales,
 }
 
-pub struct TreeOptions {
+pub struct AbsOptions {
     /// Compute per-file contributions (the default). Skipping them turns
     /// the run into a single joint compression — much faster on big trees.
     pub with_files: bool,
@@ -98,21 +98,21 @@ pub struct TreeOptions {
 /// One file's contribution to C(tree): its sequential chain-rule score in
 /// sorted-path order, rescaled so contributions sum to the joint total.
 #[derive(Serialize)]
-pub struct TreeFileScore {
+pub struct AbsFile {
     pub path: String,
     pub bytes: f64,
     pub lines: u64,
 }
 
 #[derive(Serialize)]
-pub struct TreeReport {
+pub struct AbsReport {
     pub version: VersionInfo,
     pub rev: String,
     pub file_count: usize,
     pub raw_bytes: u64,
     pub compressed_bytes: u64,
     /// Empty when contributions were suppressed.
-    pub files: Vec<TreeFileScore>,
+    pub files: Vec<AbsFile>,
     /// Attribution noise gauge for `files`; 1.0 when suppressed.
     pub scale: f64,
 }
@@ -331,7 +331,7 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     })
 }
 
-pub fn tree(git: &Git, opts: &TreeOptions) -> Result<TreeReport> {
+pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
     let rev = "HEAD".to_owned();
     let paths = git.ls_tree(&rev)?;
     let specs: Vec<String> = paths.iter().map(|p| format!("{rev}:{p}")).collect();
@@ -361,7 +361,7 @@ pub fn tree(git: &Git, opts: &TreeOptions) -> Result<TreeReport> {
         let files = kept
             .iter()
             .zip(&rescaled.scores)
-            .map(|((path, content), score)| TreeFileScore {
+            .map(|((path, content), score)| AbsFile {
                 path: (*path).clone(),
                 bytes: score.rescaled,
                 lines: content.iter().filter(|&&b| b == b'\n').count() as u64,
@@ -371,9 +371,9 @@ pub fn tree(git: &Git, opts: &TreeOptions) -> Result<TreeReport> {
     } else {
         (Vec::new(), 1.0)
     };
-    files.sort_by(|a: &TreeFileScore, b: &TreeFileScore| b.bytes.total_cmp(&a.bytes));
+    files.sort_by(|a: &AbsFile, b: &AbsFile| b.bytes.total_cmp(&a.bytes));
 
-    Ok(TreeReport {
+    Ok(AbsReport {
         version: VersionInfo::for_scorer(&scorer),
         rev,
         file_count: kept.len(),

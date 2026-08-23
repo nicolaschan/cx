@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use cx_cli::git::Git;
-use cx_cli::pipeline::{self, DiffOptions, TreeOptions};
+use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
 use cx_cli::report;
 
 /// Score git trees and diffs by marginal description length: how much
@@ -56,7 +56,7 @@ enum Cmd {
         json: bool,
     },
     /// Absolute C(tree) of HEAD — the trend-line number.
-    Tree {
+    Abs {
         /// Hide per-file contributions.
         #[arg(long)]
         no_files: bool,
@@ -80,9 +80,9 @@ fn main() -> Result<()> {
     match cli.cmd {
         None => {
             let o = cli.overview;
-            let tree = pipeline::tree(
+            let abs = pipeline::abs(
                 &git,
-                &TreeOptions {
+                &AbsOptions {
                     with_files: !o.no_files,
                 },
             )?;
@@ -94,14 +94,14 @@ fn main() -> Result<()> {
                 },
             )?;
             if o.json {
-                let combined = serde_json::json!({ "tree": tree, "diff": diff });
+                let combined = serde_json::json!({ "abs": abs, "diff": diff });
                 println!("{}", serde_json::to_string_pretty(&combined)?);
             } else if o.no_files {
-                print!("{}", report::render_tree(&tree, o.top));
+                print!("{}", report::render_abs(&abs, o.top));
                 println!();
                 print!("{}", report::render_diff(&diff, o.top));
             } else {
-                print!("{}", report::render_overview(&tree, &diff, o.top));
+                print!("{}", report::render_overview(&abs, &diff, o.top));
             }
         }
         Some(Cmd::Diff {
@@ -121,21 +121,21 @@ fn main() -> Result<()> {
                 print!("{}", report::render_diff(&report, top));
             }
         }
-        Some(Cmd::Tree {
+        Some(Cmd::Abs {
             no_files,
             top,
             json,
         }) => {
-            let report = pipeline::tree(
+            let report = pipeline::abs(
                 &git,
-                &TreeOptions {
+                &AbsOptions {
                     with_files: !no_files,
                 },
             )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                print!("{}", report::render_tree(&report, top));
+                print!("{}", report::render_abs(&report, top));
             }
         }
     }

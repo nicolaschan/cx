@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use cx_cli::git::Git;
-use cx_cli::pipeline::{self, DiffOptions, TreeOptions};
+use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -152,7 +152,7 @@ fn staged_mode_scores_the_index() {
 #[test]
 fn tree_reports_absolute_complexity_with_contributions() {
     let (_dir, git) = setup();
-    let report = pipeline::tree(&git, &TreeOptions { with_files: true }).unwrap();
+    let report = pipeline::abs(&git, &AbsOptions { with_files: true }).unwrap();
     // keep.rs + moved.rs + novel.rs; Cargo.lock and logo.png excluded.
     assert_eq!(report.file_count, 3, "kept files at HEAD");
     assert!(report.compressed_bytes > 0);
@@ -175,7 +175,7 @@ fn tree_reports_absolute_complexity_with_contributions() {
 #[test]
 fn tree_contributions_are_suppressable() {
     let (_dir, git) = setup();
-    let report = pipeline::tree(&git, &TreeOptions { with_files: false }).unwrap();
+    let report = pipeline::abs(&git, &AbsOptions { with_files: false }).unwrap();
     assert_eq!(report.file_count, 3);
     assert!(report.files.is_empty());
     assert_eq!(report.scale, 1.0);

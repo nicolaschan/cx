@@ -6,7 +6,7 @@
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, presets};
 
 use crate::breakdown::{self, Entry, Node};
-use crate::pipeline::{DiffReport, TreeReport};
+use crate::pipeline::{AbsReport, DiffReport};
 
 /// One rendered line of the dust-style tree breakdown.
 struct BreakdownRow {
@@ -232,7 +232,7 @@ pub fn render_diff(report: &DiffReport, top: usize) -> String {
 }
 
 /// Entries for the tree-only view: no diff information.
-fn tree_entries(report: &TreeReport) -> impl Iterator<Item = Entry<'_>> {
+fn abs_entries(report: &AbsReport) -> impl Iterator<Item = Entry<'_>> {
     report.files.iter().map(|f| Entry {
         path: &f.path,
         bytes: f.bytes,
@@ -245,7 +245,7 @@ fn tree_entries(report: &TreeReport) -> impl Iterator<Item = Entry<'_>> {
 /// The default view: one table merging the tree breakdown with the
 /// diff's ΔC per touched path. Deleted files have no tree bytes but
 /// their refunds still aggregate into their directory's ΔC.
-pub fn render_overview(tree: &TreeReport, diff: &DiffReport, top: usize) -> String {
+pub fn render_overview(tree: &AbsReport, diff: &DiffReport, top: usize) -> String {
     let mut changed: std::collections::HashMap<&str, &crate::pipeline::DiffFile> =
         diff.files.iter().map(|f| (f.path.as_str(), f)).collect();
     let mut entries: Vec<Entry> = tree
@@ -309,11 +309,11 @@ pub fn render_overview(tree: &TreeReport, diff: &DiffReport, top: usize) -> Stri
     out
 }
 
-pub fn render_tree(report: &TreeReport, top: usize) -> String {
+pub fn render_abs(report: &AbsReport, top: usize) -> String {
     let mut out = String::new();
     if !report.files.is_empty() {
         let total = report.compressed_bytes.max(1) as f64;
-        out.push_str(&breakdown_table(tree_entries(report), total, top, None));
+        out.push_str(&breakdown_table(abs_entries(report), total, top, None));
         out.push_str("\n\n");
     }
     out.push_str(&format!(
