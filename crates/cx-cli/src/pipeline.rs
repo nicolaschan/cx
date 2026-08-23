@@ -12,6 +12,7 @@ use crate::git::{Git, Status};
 
 const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/master"];
 
+#[derive(Default)]
 pub struct DiffOptions {
     pub base: Option<String>,
     pub staged: bool,
@@ -94,10 +95,11 @@ pub struct DiffReport {
     pub scales: Scales,
 }
 
+#[derive(Default)]
 pub struct AbsOptions {
-    /// Compute per-file contributions (the default). Skipping them turns
-    /// the run into a single joint compression — much faster on big trees.
-    pub with_files: bool,
+    /// Skip per-file contributions, leaving one joint compression —
+    /// much faster on big trees.
+    pub no_files: bool,
     /// Exclude test files from the universe entirely.
     pub ignore_tests: bool,
 }
@@ -370,7 +372,9 @@ pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
     // Per-file contribution: the chain rule over sorted paths against an
     // empty reference — the same attribution machinery as diff scoring,
     // with C(tree) itself as the rescale target.
-    let (mut files, scale) = if opts.with_files {
+    let (mut files, scale) = if opts.no_files {
+        (Vec::new(), 1.0)
+    } else {
         let rescaled = rescale(&scorer.score_sequential(&[], &kept_contents), compressed);
         let files = kept
             .iter()
@@ -382,8 +386,6 @@ pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
             })
             .collect();
         (files, rescaled.scale)
-    } else {
-        (Vec::new(), 1.0)
     };
     files.sort_by(|a: &AbsFile, b: &AbsFile| b.bytes.total_cmp(&a.bytes));
 

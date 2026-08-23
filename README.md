@@ -70,26 +70,20 @@ Files are filtered before scoring: `.gitattributes` linguist annotations,
 binary detection, common generated/vendored patterns (lockfiles, `dist/`,
 `vendor/`, minified assets…), and a `.cxignore` (gitignore syntax).
 
-`--ignore-tests` adds test files to that exclusion, detected by naming
-convention only — no language, build system, or parser is consulted, so
-the rule works the same in a language cx has never seen. A path is a test
-when any directory component is `test`, `tests`, `spec`, `e2e`,
-`__tests__`, `__mocks__`, or `testdata`, or when the filename has `test`,
-`tests`, `spec`, or `specs` as a whole segment once split on `_`, `-`,
-and `.` — so `foo_test.go`, `foo-test.js`, `foo.test.ts`, `foo.spec.js`,
-`test_foo.py`, and a bare `tests.rs` are all one convention wearing
-different separators, while `latest.rs` and `contest_view.rs` are
-production code. Excluded files leave the universe entirely — no
-reference, no scoring pass — and are listed as `skipped`, so the call is
-always visible.
+`--ignore-tests` adds test files, recognised by naming convention
+alone — no language, build system, or parser. A path is a test when any
+segment of it, split on `/`, `_`, `-`, and `.`, is `test`, `tests`, or
+`spec`, or when a *directory* segment is `e2e`, `mocks`, or `testdata`.
+So `foo_test.go`, `foo-test.js`, `foo.test.ts`, `test_foo.py`,
+`tests.rs`, and `e2e/*` are one convention in different separators,
+while `latest.rs` stays production code and a `…-e2e-design.md` stays a
+document about tests.
 
-Three deliberate consequences: plural `specs/` is *not* a test directory
-(it is design documentation more often than tests), test *support* like
-`test_helpers.rs` *is* test code, and names only one toolchain
-recognizes — pytest's `conftest.py`, JUnit's camelCase `FooTest.java` —
-are *not* detected, because identifying them means teaching cx one
-ecosystem at a time. Rust's inline `#[cfg(test)] mod tests` likewise
-cannot be excluded at file granularity; that needs hunk scoring. Density
+Deliberate consequences: plural `specs/` is documentation; test support
+like `test_helpers.rs` is test code; names only one toolchain knows
+(`conftest.py`, `FooTest.java`) go undetected, since finding them means
+teaching cx one ecosystem at a time; and inline `#[cfg(test)]` needs
+hunk scoring to exclude. Density
 outliers (bytes-per-line far from the run median on added files) are
 flagged `⚠`, not dropped — probable generated content no pattern
 anticipated.

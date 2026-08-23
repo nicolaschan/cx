@@ -38,51 +38,38 @@ const LINGUIST_PATTERNS: [&str; 15] = [
     "node_modules/**",
 ];
 
-/// Directories that a test runner owns wholesale, by name alone.
+/// Words that name a test anywhere in a path.
 ///
-/// Deliberately absent: `specs`. Plural "specs" is design documentation
-/// more often than it is tests — it matched 40 design documents and zero
-/// tests on a real repo — while spec-named *files* are still caught by
-/// [`TEST_WORDS`] wherever they live.
-const TEST_DIRS: [&str; 7] = [
-    "test",
-    "tests",
-    "spec",
-    "e2e",
-    "__tests__",
-    "__mocks__",
-    "testdata",
-];
+/// Absent on purpose: `specs`. Plural "specs" is design documentation
+/// more often than tests — 40 documents and zero tests on a real repo.
+const TEST_WORDS: [&str; 3] = ["test", "tests", "spec"];
 
-/// Words that name a test file. Matched only as whole segments of the
-/// filename, split on the separators every ecosystem builds these names
-/// from — never as substrings, so `latest.rs` and `contest_view.rs` are
-/// production code.
-const TEST_WORDS: [&str; 4] = ["test", "tests", "spec", "specs"];
+/// Words that name a test *directory* only. In a filename they describe
+/// the subject rather than the kind: `web/e2e/login.js` is a test,
+/// `docs/2026-04-27-web-e2e-design.md` is a document about one.
+const TEST_DIR_WORDS: [&str; 3] = ["e2e", "mocks", "testdata"];
 
-const SEGMENT_SEPARATORS: [char; 3] = ['_', '-', '.'];
+/// A test word means the same thing whichever separator surrounds it.
+const SEPARATORS: [char; 4] = ['/', '_', '-', '.'];
 
-/// Whether a path names a test, by naming convention only — no language,
-/// build system, or parser is consulted. This covers `foo_test.go`,
-/// `foo-test.js`, `foo.test.ts`, `foo.spec.js`, `test_foo.py`, a bare
-/// `tests.rs`, and anything under a test directory, because they are all
-/// the same convention wearing different separators.
+/// Whether a path names a test, by convention alone — no language, build
+/// system, or parser. Words count only as whole segments, so `foo_test.go`,
+/// `foo-test.js`, `foo.test.ts`, `test_foo.py`, `tests.rs`, `__mocks__/`
+/// and `e2e/` are tests while `latest.rs` and `contest_view.rs` are not.
 ///
-/// The deliberate cost of staying language-agnostic: names that only a
-/// specific toolchain recognizes are *not* tests here — pytest's
-/// `conftest.py` and JUnit's camelCase `FooTest.java` have no test word
-/// to find, and identifying them would mean teaching cx one ecosystem at
-/// a time.
+/// The price of staying language-agnostic: a name only one toolchain
+/// recognizes carries no test word, so pytest's `conftest.py` and JUnit's
+/// `FooTest.java` are missed. Teaching cx to see them means teaching it
+/// one ecosystem at a time.
 fn is_test_path(path: &str) -> bool {
-    let mut components = path.split('/').collect::<Vec<_>>();
-    let file = components.pop().unwrap_or_default().to_ascii_lowercase();
-    let in_test_dir = components
-        .iter()
-        .any(|c| TEST_DIRS.contains(&c.to_ascii_lowercase().as_str()));
-    in_test_dir
-        || file
-            .split(SEGMENT_SEPARATORS)
-            .any(|segment| TEST_WORDS.contains(&segment))
+    let (dirs, file) = path.rsplit_once('/').unwrap_or(("", path));
+    let names_a_test = |part: &str, words: &[&str]| {
+        part.split(SEPARATORS)
+            .any(|segment| words.iter().any(|w| segment.eq_ignore_ascii_case(w)))
+    };
+    names_a_test(dirs, &TEST_WORDS)
+        || names_a_test(dirs, &TEST_DIR_WORDS)
+        || names_a_test(file, &TEST_WORDS)
 }
 
 pub struct Filter {
@@ -227,71 +214,46 @@ mod tests {
         }
     }
 
-    fn ignoring_tests() -> Filter {
-        Filter::new(Path::new("/nonexistent"), HashMap::new(), true).unwrap()
-    }
-
-    /// One convention in many separators — no language is consulted, so
-    /// a name cx has never seen still classifies correctly.
+    /// The whole convention, in one table: what counts as a test, what
+    /// does not, and the two costs of consulting no language at all —
+    /// documents *about* tests are kept, and names only one toolchain
+    /// knows (`conftest.py`, `FooTest.java`) go undetected.
     #[test]
-    fn ignores_test_naming_conventions() {
-        let f = ignoring_tests();
-        for path in [
-            // Test directories, at any depth.
-            "tests/end_to_end.rs",
-            "crates/cx-cli/tests/e2e.rs",
-            "test/helper.js",
-            "web/e2e/login.spec.js",
-            "spec/models/user_spec.rb",
-            "src/__tests__/button.tsx",
-            "src/__mocks__/fs.js",
-            "pkg/testdata/sample.json",
-            "Tests/Legacy.cs", // case-insensitive
-            // Test words as whole filename segments, any separator.
-            "src/parser_test.go",
-            "app/views_test.gleam",
-            "src/parser-test.js",
-            "ui/Button.test.tsx",
-            "web/app.spec.ts",
-            "api/test_client.py",
-            "src/tests.rs", // bare module name
-            "src/spec.lua",
-            // Test *support* counts as test: it exists only for tests,
-            // and the skipped list makes the call visible.
-            "crates/store/src/test_helpers.rs",
+    fn detects_tests_by_naming_convention() {
+        let f = Filter::new(Path::new("/nonexistent"), HashMap::new(), true).unwrap();
+        for (path, is_test) in [
+            // Test directories, at any depth, any separator, any case.
+            ("tests/end_to_end.rs", true),
+            ("crates/cx-cli/tests/e2e.rs", true),
+            ("test/helper.js", true),
+            ("web/e2e/login.spec.js", true),
+            ("spec/models/user_spec.rb", true),
+            ("src/__tests__/button.tsx", true),
+            ("src/__mocks__/fs.js", true),
+            ("pkg/testdata/sample.json", true),
+            ("Tests/Legacy.cs", true),
+            // Test words as whole filename segments.
+            ("src/parser_test.go", true),
+            ("src/parser-test.js", true),
+            ("ui/Button.test.tsx", true),
+            ("api/test_client.py", true),
+            ("src/tests.rs", true),
+            // Test support exists only for tests, so it counts as one.
+            ("crates/store/src/test_helpers.rs", true),
+            // A test word inside a longer word is just a word.
+            ("src/main.rs", false),
+            ("src/testing.rs", false),
+            ("src/latest.rs", false),
+            ("src/contest_view.rs", false),
+            ("src/attestation.go", false),
+            // Documents about tests are not tests.
+            ("docs/specs/2026-05-01-relay-design.md", false),
+            ("docs/plans/2026-04-27-web-e2e.md", false),
+            // The price of knowing no language.
+            ("api/conftest.py", false),
+            ("src/main/java/FooTest.java", false),
         ] {
-            assert_eq!(f.exclusion(path, b"code"), Some("test"), "{path}");
-        }
-    }
-
-    #[test]
-    fn ignoring_tests_spares_production_code() {
-        let f = ignoring_tests();
-        for path in [
-            "src/main.rs",
-            // Test words only count as whole segments.
-            "src/testing.rs",
-            "src/latest.rs",
-            "src/contest_view.rs",
-            "src/protest.py",
-            "src/attestation.go",
-            // Plural "specs" is design documentation far more often than
-            // it is tests — a real repo had 40 of these and zero tests.
-            "docs/specs/2026-05-01-relay-design.md",
-        ] {
-            assert_eq!(f.exclusion(path, b"code"), None, "{path}");
-        }
-    }
-
-    /// The price of refusing language-specific knowledge: names that only
-    /// one toolchain recognizes carry no test word, so cx keeps them.
-    /// Documented rather than special-cased — the alternative is teaching
-    /// cx one ecosystem at a time.
-    #[test]
-    fn toolchain_specific_names_are_not_detected() {
-        let f = ignoring_tests();
-        for path in ["api/conftest.py", "src/main/java/FooTest.java"] {
-            assert_eq!(f.exclusion(path, b"code"), None, "{path}");
+            assert_eq!(f.exclusion(path, b"code").is_some(), is_test, "{path}");
         }
     }
 }

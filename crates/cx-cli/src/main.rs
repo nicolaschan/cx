@@ -28,11 +28,9 @@ struct Cli {
 /// the environment means the same thing in all of them.
 #[derive(Args)]
 struct CommonArgs {
-    /// Exclude test files everywhere: no reference, no scoring, listed
-    /// as skipped. Detected by naming convention, not by language.
-    ///
-    /// Accepts a value so an environment default can be turned back off
-    /// for one run: `--ignore-tests=false`.
+    /// Exclude test files everywhere, by naming convention. Takes an
+    /// optional value so a pinned default can be vetoed for one run:
+    /// `--ignore-tests=false`.
     #[arg(
         long,
         env = "CX_IGNORE_TESTS",
@@ -73,7 +71,7 @@ impl DiffArgs {
 impl CommonArgs {
     fn abs_options(&self, no_files: bool) -> AbsOptions {
         AbsOptions {
-            with_files: !no_files,
+            no_files,
             ignore_tests: self.ignore_tests,
         }
     }
