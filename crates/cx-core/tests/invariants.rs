@@ -2,29 +2,8 @@
 //! behavioral claim about the metrics, not about zstd internals; if one
 //! fails after a zstd upgrade, the metric semantics regressed.
 
+use cx_core::testgen::code as gen_code;
 use cx_core::{Scorer, rescale};
-
-/// Deterministic code-like text: different seeds give different content of
-/// equal intrinsic complexity (same generator, same length).
-fn gen_code(seed: u64, lines: usize) -> Vec<u8> {
-    let mut state = seed.wrapping_mul(0x9E3779B97F4A7C15) | 1;
-    let mut next = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
-    let mut out = String::new();
-    for i in 0..lines {
-        out.push_str(&format!(
-            "fn f_{i}_{:x}(x: u32) -> u32 {{ x.wrapping_mul({}).wrapping_add({}) }}\n",
-            next() & 0xffff,
-            next() & 0xffffff,
-            next() & 0xffffff,
-        ));
-    }
-    out.into_bytes()
-}
 
 fn scorer() -> Scorer {
     Scorer::default()
