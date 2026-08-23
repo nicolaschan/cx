@@ -40,6 +40,9 @@ fn setup() -> (tempfile::TempDir, Git) {
     git(root, &["checkout", "-q", "-b", "feature"]);
     // Novel logic: new content unlike anything in the tree.
     fs::write(root.join("src/novel.rs"), gen_code(99, 120)).unwrap();
+    // A substantial new test, for --ignore-tests.
+    fs::create_dir(root.join("tests")).unwrap();
+    fs::write(root.join("tests/novel_test.rs"), gen_code(77, 120)).unwrap();
     // Pure move: same bytes, new path.
     git(root, &["mv", "src/mover.rs", "src/moved.rs"]);
     // Deletion of unique content.
@@ -61,14 +64,7 @@ fn setup() -> (tempfile::TempDir, Git) {
 #[test]
 fn scores_a_realistic_branch() {
     let (_dir, git) = setup();
-    let report = pipeline::diff(
-        &git,
-        &DiffOptions {
-            base: None,
-            staged: false,
-        },
-    )
-    .unwrap();
+    let report = pipeline::diff(&git, &DiffOptions::default()).unwrap();
 
     let by_path = |p: &str| {
         report
@@ -127,6 +123,89 @@ fn scores_a_realistic_branch() {
     }
 }
 
+/// What excluding tests must and must not do to the numbers. That the
+/// flag reaches scoring at all is covered through the binary below.
+#[test]
+fn ignoring_tests_drops_their_cost_and_leaves_the_rest() {
+    let (_dir, git) = setup();
+    let scored = |ignore_tests| {
+        pipeline::diff(
+            &git,
+            &DiffOptions {
+                ignore_tests,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let review = |r: &cx_cli::pipeline::DiffReport, path| {
+        r.files
+            .iter()
+            .find(|f| f.path == path)
+            .map(|f| f.review_bytes)
+    };
+    let (with, without) = (scored(false), scored(true));
+
+    assert!(
+        review(&with, "tests/novel_test.rs").is_some_and(|b| b > 500.0),
+        "the fixture's test must be substantial enough to matter"
+    );
+    assert_eq!(review(&without, "tests/novel_test.rs"), None);
+    assert!(
+        without.totals.review_bytes < with.totals.review_bytes,
+        "dropping a substantial test must lower the total"
+    );
+    // Production is conditioned on the same reference either way, since
+    // an excluded test was never part of it.
+    let (before, after) = (
+        review(&with, "src/novel.rs").unwrap(),
+        review(&without, "src/novel.rs").unwrap(),
+    );
+    assert!(
+        (before - after).abs() < 0.25 * before,
+        "production scores should barely move: {before} vs {after}"
+    );
+}
+
+/// The environment default through the real binary: a pinned value is
+/// only useful if it reaches scoring and a single run can still veto it.
+#[test]
+fn ignore_tests_can_be_pinned_through_the_environment() {
+    let (dir, _git) = setup();
+    for (pinned, flag, expected) in [
+        (None, None, false),
+        (Some("1"), None, true),
+        (Some("true"), None, true),
+        // A set variable must not mean "true" whatever its value.
+        (Some("0"), None, false),
+        (Some("1"), Some("--ignore-tests=false"), false),
+        (None, Some("--ignore-tests"), true),
+    ] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+        cmd.current_dir(dir.path())
+            .args(["diff", "--json"])
+            .args(flag);
+        match pinned {
+            Some(value) => cmd.env("CX_IGNORE_TESTS", value),
+            // An inherited setting must not decide this test's outcome.
+            None => cmd.env_remove("CX_IGNORE_TESTS"),
+        };
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let ignored = report["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["path"] == "tests/novel_test.rs" && s["reason"] == "test");
+        assert_eq!(ignored, expected, "CX_IGNORE_TESTS={pinned:?}, {flag:?}");
+    }
+}
+
 #[test]
 fn staged_mode_scores_the_index() {
     let (dir, git) = setup();
@@ -142,8 +221,8 @@ fn staged_mode_scores_the_index() {
     let report = pipeline::diff(
         &git,
         &DiffOptions {
-            base: None,
             staged: true,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -157,13 +236,14 @@ fn staged_mode_scores_the_index() {
 #[test]
 fn tree_reports_absolute_complexity_with_contributions() {
     let (_dir, git) = setup();
-    let report = pipeline::abs(&git, &AbsOptions { with_files: true }).unwrap();
-    // keep.rs + moved.rs + novel.rs; Cargo.lock and logo.png excluded.
-    assert_eq!(report.file_count, 3, "kept files at HEAD");
+    let report = pipeline::abs(&git, &AbsOptions::default()).unwrap();
+    // keep.rs + moved.rs + novel.rs + tests/novel_test.rs;
+    // Cargo.lock and logo.png excluded.
+    assert_eq!(report.file_count, 4, "kept files at HEAD");
     assert!(report.compressed_bytes > 0);
     assert!(report.compressed_bytes < report.raw_bytes);
 
-    assert_eq!(report.files.len(), 3);
+    assert_eq!(report.files.len(), 4);
     let sum: f64 = report.files.iter().map(|f| f.bytes).sum();
     assert!(
         (sum - report.compressed_bytes as f64).abs() < 1e-6 * sum,
@@ -180,8 +260,15 @@ fn tree_reports_absolute_complexity_with_contributions() {
 #[test]
 fn tree_contributions_are_suppressable() {
     let (_dir, git) = setup();
-    let report = pipeline::abs(&git, &AbsOptions { with_files: false }).unwrap();
-    assert_eq!(report.file_count, 3);
+    let report = pipeline::abs(
+        &git,
+        &AbsOptions {
+            no_files: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report.file_count, 4);
     assert!(report.files.is_empty());
     assert_eq!(report.scale, 1.0);
 }

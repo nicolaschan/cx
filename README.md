@@ -40,7 +40,15 @@ cx       [-n <N>] [--base <ref>] [--staged]   # overview: one merged table — t
                                               #   breakdown plus the diff's ΔC per path
 cx diff  [-n <N>] [--base <ref>] [--staged]   # just the diff, sized by review cost
 cx abs   [-n <N>] [--no-files] [--json]       # absolute C(tree): the trend-line number
+
+# any of the above, with tests left out entirely:
+cx diff --ignore-tests
 ```
+
+Defaults can be pinned through the environment — `CX_IGNORE_TESTS=1`,
+`CX_TOP=15`, `CX_BASE=develop` — and any single run can still override
+them on the command line (`--ignore-tests=false`, `-n 50`). `cx --help`
+lists which variable backs each flag.
 
 The tree breakdown is dust-style: contributions aggregate up the
 directory tree, only the `-n` globally biggest files/directories are
@@ -60,7 +68,22 @@ per-file numbers, far off → trust totals).
 
 Files are filtered before scoring: `.gitattributes` linguist annotations,
 binary detection, common generated/vendored patterns (lockfiles, `dist/`,
-`vendor/`, minified assets…), and a `.cxignore` (gitignore syntax). Density
+`vendor/`, minified assets…), and a `.cxignore` (gitignore syntax).
+
+`--ignore-tests` adds test files, recognised by naming convention
+alone — no language, build system, or parser. A path is a test when any
+segment of it, split on `/`, `_`, `-`, and `.`, is `test`, `tests`, or
+`spec`, or when a *directory* segment is `e2e`, `mocks`, or `testdata`.
+So `foo_test.go`, `foo-test.js`, `foo.test.ts`, `test_foo.py`,
+`tests.rs`, and `e2e/*` are one convention in different separators,
+while `latest.rs` stays production code and a `…-e2e-design.md` stays a
+document about tests.
+
+Deliberate consequences: plural `specs/` is documentation; test support
+like `test_helpers.rs` is test code; names only one toolchain knows
+(`conftest.py`, `FooTest.java`) go undetected, since finding them means
+teaching cx one ecosystem at a time; and inline `#[cfg(test)]` needs
+hunk scoring to exclude. Density
 outliers (bytes-per-line far from the run median on added files) are
 flagged `⚠`, not dropped — probable generated content no pattern
 anticipated.
