@@ -14,6 +14,7 @@ path = "src/main.rs"
 cx-core = { path = "../cx-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+comfy-table = "7"
 content_inspector = "0.2"
 globset = "0.4"
 ignore = "0.4"

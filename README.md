@@ -11,29 +11,44 @@ Two independent axes per file, one PR total:
 - **REVIEW** — `C(new | old tree)`: what a reviewer who knows the codebase
   must newly absorb. Repo-conventional plumbing compresses to ≈ 0 even when
   it spans hundreds of lines; a dense 60-line contract change does not.
-- **ΔCOMPLEX** — `C(new | remainder) − C(old | remainder)`, where the
+- **ΔC** — `C(new | remainder) − C(old | remainder)`, where the
   remainder is the tree minus all touched content: how much complexity the
   change adds to (or refunds from) the codebase. A full rewrite of equal
   intrinsic complexity scores REVIEW high, Δ ≈ 0. Deleting one of N
   duplicated copies refunds ≈ 0; deleting unique content refunds in full.
 
 ```console
-$ cx score
- REVIEW    ΔCOMPLEX    B/LINE   PATH
-  2.0 KB    +2.0 KB       13   crates/cx-core/src/lib.rs (added)
-  1.7 KB    +1.7 KB       11   crates/cx-core/tests/invariants.rs (added)
-   459 B     +448 B       15   crates/cx-core/tests/golden.rs (added)
-      ≈0         ≈0        -   crates/cx-cli/src/main.rs (renamed from src/main.rs)
-──────────────────────────────────────────────
- PR total: review 4.5 KB, Δcomplexity +4.3 KB
+$ cx diff
+ REVIEW  ΔC          LINES  PATH                     SHARE
+ 4.1 KB  +3.6 KB      1206  ├─┬ crates               █████████░  93.0%
+ 4.1 KB  +3.6 KB      1206  │ └─┬ cx-cli             █████████░  93.0%
+ 1.5 KB  +1.2 KB       267  │   ├── report.rs        ███░░░░░░░  32.8%
+ 1.4 KB  +1.5 KB  +    169  │   ├── breakdown.rs     ███░░░░░░░  30.4%
+     ≈0  −5.0 KB  −      -  │   └── poller.rs        ░░░░░░░░░░   0.1%
+ 1.9 KB   +248 B        92  └── README.md            █░░░░░░░░░   9.5%
+
+ PR total: review 4.4 KB, ΔC +3.9 KB
  attribution scale: 0.94 (ok)   zstd 1.5.7, level 19, window≤2^31
  skipped: Cargo.lock (generated/vendored pattern)
 ```
 
+The `+`/`−`/`→` column marks added, deleted, and renamed files (`⚠` for
+density outliers).
+
 ```
-cx score [--base <ref>] [--staged] [--json]   # score merge-base..HEAD (or the index)
-cx tree  [--json]                             # absolute C(tree): the trend-line number
+cx       [-n <N>] [--base <ref>] [--staged]   # overview: one merged table — tree
+                                              #   breakdown plus the diff's ΔC per path
+cx diff  [-n <N>] [--base <ref>] [--staged]   # just the diff, sized by review cost
+cx abs   [-n <N>] [--no-files] [--json]       # absolute C(tree): the trend-line number
 ```
+
+The tree breakdown is dust-style: contributions aggregate up the
+directory tree, only the `-n` globally biggest files/directories are
+shown (default 30), and everything pruned collapses into a per-directory
+`… +N more` row — so the view stays one screen even on repos with
+thousands of files. `--no-files` (also on the bare `cx`) suppresses the
+breakdown and skips computing it entirely. Tables colorize on a terminal
+and degrade to plain text when piped.
 
 `--json` emits the full report (per-file scores, skipped files, totals,
 scale factors, compressor version) — the stable contract for tooling.
@@ -46,8 +61,9 @@ per-file numbers, far off → trust totals).
 Files are filtered before scoring: `.gitattributes` linguist annotations,
 binary detection, common generated/vendored patterns (lockfiles, `dist/`,
 `vendor/`, minified assets…), and a `.cxignore` (gitignore syntax). Density
-outliers (`B/LINE` far from the run median on added files) are flagged, not
-dropped — probable generated content no pattern anticipated.
+outliers (bytes-per-line far from the run median on added files) are
+flagged `⚠`, not dropped — probable generated content no pattern
+anticipated.
 
 Known limits, by design: scores are relative rankings within one repo and
 compressor version, not absolute cross-repo numbers; information ≠
@@ -58,8 +74,8 @@ complexity against the codebase as it is.
 ## Run
 
 ```sh
-nix run github:nicolaschan/cx -- score
-docker run -v "$PWD:/repo" -w /repo ghcr.io/nicolaschan/cx score
+nix run github:nicolaschan/cx
+docker run -v "$PWD:/repo" -w /repo ghcr.io/nicolaschan/cx
 ```
 
 Prebuilt binaries for Linux (x86_64, aarch64) and macOS (aarch64) are

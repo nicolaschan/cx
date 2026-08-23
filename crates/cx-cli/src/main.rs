@@ -1,37 +1,68 @@
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use cx_cli::git::Git;
-use cx_cli::pipeline::{self, ScoreOptions};
+use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
 use cx_cli::report;
 
-/// Score git diffs by marginal description length: how much new
-/// information a change adds, conditioned on what the codebase already
-/// contains.
+/// Score git trees and diffs by marginal description length: how much
+/// new information content adds, conditioned on what the codebase
+/// already contains. With no subcommand, shows one merged breakdown:
+/// the tree's complexity per file/directory plus the diff's ΔC.
 #[derive(Parser)]
 #[command(name = "cx", version)]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
+    #[command(flatten)]
+    overview: OverviewArgs,
+}
+
+/// Flags for the default (no-subcommand) overview.
+#[derive(Args)]
+struct OverviewArgs {
+    /// Base ref for the diff (default: main/master merge-base).
+    #[arg(long)]
+    base: Option<String>,
+    /// Diff the index instead of HEAD.
+    #[arg(long)]
+    staged: bool,
+    /// Hide the per-file breakdown; show summary lines only.
+    #[arg(long)]
+    no_files: bool,
+    /// Show only the N biggest files/directories in the breakdown.
+    #[arg(short = 'n', long, default_value_t = 30)]
+    top: usize,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
     /// Score the changes between a base branch and HEAD (or the index).
-    Score {
+    Diff {
         /// Base ref to diff against (default: main/master merge-base).
         #[arg(long)]
         base: Option<String>,
-        /// Score the index instead of HEAD.
+        /// Diff the index instead of HEAD.
         #[arg(long)]
         staged: bool,
         #[arg(long, value_enum, default_value = "file")]
         granularity: Granularity,
+        /// Show only the N biggest files/directories in the breakdown.
+        #[arg(short = 'n', long, default_value_t = 30)]
+        top: usize,
         #[arg(long)]
         json: bool,
     },
     /// Absolute C(tree) of HEAD — the trend-line number.
-    Tree {
+    Abs {
+        /// Hide per-file contributions.
+        #[arg(long)]
+        no_files: bool,
+        /// Show only the N biggest files/directories in the breakdown.
+        #[arg(short = 'n', long, default_value_t = 30)]
+        top: usize,
         #[arg(long)]
         json: bool,
     },
@@ -43,33 +74,75 @@ enum Granularity {
     Hunk,
 }
 
+/// Print a report as pretty JSON or its rendered table.
+fn emit<T: serde::Serialize>(json: bool, value: &T, rendered: String) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    } else {
+        print!("{rendered}");
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let git = Git::discover()?;
     match cli.cmd {
-        Cmd::Score {
+        None => {
+            let o = cli.overview;
+            let abs = pipeline::abs(
+                &git,
+                &AbsOptions {
+                    with_files: !o.no_files,
+                },
+            )?;
+            let diff = pipeline::diff(
+                &git,
+                &DiffOptions {
+                    base: o.base,
+                    staged: o.staged,
+                },
+            )?;
+            let rendered = if o.no_files {
+                format!(
+                    "{}\n{}",
+                    report::render_abs(&abs, o.top),
+                    report::render_diff(&diff, o.top)
+                )
+            } else {
+                report::render_overview(&abs, &diff, o.top)
+            };
+            emit(
+                o.json,
+                &serde_json::json!({ "abs": abs, "diff": diff }),
+                rendered,
+            )?;
+        }
+        Some(Cmd::Diff {
             base,
             staged,
             granularity,
+            top,
             json,
-        } => {
+        }) => {
             if matches!(granularity, Granularity::Hunk) {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
-            let report = pipeline::score(&git, &ScoreOptions { base, staged })?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print!("{}", report::render_score(&report));
-            }
+            let report = pipeline::diff(&git, &DiffOptions { base, staged })?;
+            emit(json, &report, report::render_diff(&report, top))?;
         }
-        Cmd::Tree { json } => {
-            let report = pipeline::tree(&git)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print!("{}", report::render_tree(&report));
-            }
+        Some(Cmd::Abs {
+            no_files,
+            top,
+            json,
+        }) => {
+            let report = pipeline::abs(
+                &git,
+                &AbsOptions {
+                    with_files: !no_files,
+                },
+            )?;
+            emit(json, &report, report::render_abs(&report, top))?;
         }
     }
     Ok(())
