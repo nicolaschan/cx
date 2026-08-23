@@ -40,6 +40,9 @@ fn setup() -> (tempfile::TempDir, Git) {
     git(root, &["checkout", "-q", "-b", "feature"]);
     // Novel logic: new content unlike anything in the tree.
     fs::write(root.join("src/novel.rs"), gen_code(99, 120)).unwrap();
+    // A substantial new test, for --ignore-tests.
+    fs::create_dir(root.join("tests")).unwrap();
+    fs::write(root.join("tests/novel_test.rs"), gen_code(77, 120)).unwrap();
     // Pure move: same bytes, new path.
     git(root, &["mv", "src/mover.rs", "src/moved.rs"]);
     // Deletion of unique content.
@@ -66,6 +69,7 @@ fn scores_a_realistic_branch() {
         &DiffOptions {
             base: None,
             staged: false,
+            ignore_tests: false,
         },
     )
     .unwrap();
@@ -127,6 +131,66 @@ fn scores_a_realistic_branch() {
     }
 }
 
+/// --ignore-tests removes tests from the universe: not scored, not in
+/// any reference, reported as skipped — and production scores are
+/// otherwise untouched.
+#[test]
+fn ignore_tests_excludes_tests_from_scoring() {
+    let (_dir, git) = setup();
+    let scored = |ignore_tests| {
+        pipeline::diff(
+            &git,
+            &DiffOptions {
+                base: None,
+                staged: false,
+                ignore_tests,
+            },
+        )
+        .unwrap()
+    };
+
+    let with_tests = scored(false);
+    let test_file = with_tests
+        .files
+        .iter()
+        .find(|f| f.path == "tests/novel_test.rs")
+        .expect("test file scored by default");
+    assert!(
+        test_file.review_bytes > 500.0,
+        "the fixture's test must be substantial enough to matter"
+    );
+
+    let without = scored(true);
+    assert!(
+        !without.files.iter().any(|f| f.path.starts_with("tests/")),
+        "no test file may be scored"
+    );
+    assert!(
+        without
+            .skipped
+            .iter()
+            .any(|s| s.path == "tests/novel_test.rs" && s.reason == "test"),
+        "excluded tests must be reported, not silently dropped"
+    );
+    assert!(
+        without.totals.review_bytes < with_tests.totals.review_bytes,
+        "dropping a substantial test must lower the total"
+    );
+
+    let prod = |r: &cx_cli::pipeline::DiffReport| {
+        r.files
+            .iter()
+            .find(|f| f.path == "src/novel.rs")
+            .unwrap()
+            .review_bytes
+    };
+    let (before, after) = (prod(&with_tests), prod(&without));
+    assert!(
+        (before - after).abs() < 0.25 * before,
+        "production scores should be about the same: {before} vs {after}"
+    );
+}
+
 #[test]
 fn staged_mode_scores_the_index() {
     let (dir, git) = setup();
@@ -144,6 +208,7 @@ fn staged_mode_scores_the_index() {
         &DiffOptions {
             base: None,
             staged: true,
+            ignore_tests: false,
         },
     )
     .unwrap();
@@ -157,13 +222,21 @@ fn staged_mode_scores_the_index() {
 #[test]
 fn tree_reports_absolute_complexity_with_contributions() {
     let (_dir, git) = setup();
-    let report = pipeline::abs(&git, &AbsOptions { with_files: true }).unwrap();
-    // keep.rs + moved.rs + novel.rs; Cargo.lock and logo.png excluded.
-    assert_eq!(report.file_count, 3, "kept files at HEAD");
+    let report = pipeline::abs(
+        &git,
+        &AbsOptions {
+            with_files: true,
+            ignore_tests: false,
+        },
+    )
+    .unwrap();
+    // keep.rs + moved.rs + novel.rs + tests/novel_test.rs;
+    // Cargo.lock and logo.png excluded.
+    assert_eq!(report.file_count, 4, "kept files at HEAD");
     assert!(report.compressed_bytes > 0);
     assert!(report.compressed_bytes < report.raw_bytes);
 
-    assert_eq!(report.files.len(), 3);
+    assert_eq!(report.files.len(), 4);
     let sum: f64 = report.files.iter().map(|f| f.bytes).sum();
     assert!(
         (sum - report.compressed_bytes as f64).abs() < 1e-6 * sum,
@@ -180,8 +253,15 @@ fn tree_reports_absolute_complexity_with_contributions() {
 #[test]
 fn tree_contributions_are_suppressable() {
     let (_dir, git) = setup();
-    let report = pipeline::abs(&git, &AbsOptions { with_files: false }).unwrap();
-    assert_eq!(report.file_count, 3);
+    let report = pipeline::abs(
+        &git,
+        &AbsOptions {
+            with_files: false,
+            ignore_tests: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(report.file_count, 4);
     assert!(report.files.is_empty());
     assert_eq!(report.scale, 1.0);
 }

@@ -40,6 +40,9 @@ cx       [-n <N>] [--base <ref>] [--staged]   # overview: one merged table — t
                                               #   breakdown plus the diff's ΔC per path
 cx diff  [-n <N>] [--base <ref>] [--staged]   # just the diff, sized by review cost
 cx abs   [-n <N>] [--no-files] [--json]       # absolute C(tree): the trend-line number
+
+# any of the above, with tests left out entirely:
+cx diff --ignore-tests
 ```
 
 The tree breakdown is dust-style: contributions aggregate up the
@@ -60,7 +63,18 @@ per-file numbers, far off → trust totals).
 
 Files are filtered before scoring: `.gitattributes` linguist annotations,
 binary detection, common generated/vendored patterns (lockfiles, `dist/`,
-`vendor/`, minified assets…), and a `.cxignore` (gitignore syntax). Density
+`vendor/`, minified assets…), and a `.cxignore` (gitignore syntax).
+
+`--ignore-tests` adds test files to that exclusion: `test/`, `tests/`,
+`spec/`, `e2e/`, `__tests__/`, `__mocks__/`, `testdata/` directories, and
+`*_test.*`, `*.test.*`, `*.spec.*`, `*_spec.*`, `test_*.*`, `conftest.py`,
+`*Test.java` filenames. Excluded files leave the universe entirely — no
+reference, no scoring pass — and are listed as `skipped`, so the call is
+always visible. Two deliberate judgments: plural `specs/` is *not* matched
+(it is design documentation more often than tests), and test *support*
+(`src/test_helpers.rs`, `conftest.py`) *is* treated as tests. Rust's
+inline `#[cfg(test)] mod tests` cannot be excluded at file granularity —
+that needs hunk scoring. Density
 outliers (bytes-per-line far from the run median on added files) are
 flagged `⚠`, not dropped — probable generated content no pattern
 anticipated.

@@ -15,6 +15,9 @@ const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/maste
 pub struct DiffOptions {
     pub base: Option<String>,
     pub staged: bool,
+    /// Exclude test files from the universe entirely — they are then in
+    /// no reference and no scoring pass, and appear as skipped.
+    pub ignore_tests: bool,
 }
 
 #[derive(Serialize)]
@@ -95,6 +98,8 @@ pub struct AbsOptions {
     /// Compute per-file contributions (the default). Skipping them turns
     /// the run into a single joint compression — much faster on big trees.
     pub with_files: bool,
+    /// Exclude test files from the universe entirely.
+    pub ignore_tests: bool,
 }
 
 /// One file's contribution to C(tree): its sequential chain-rule score in
@@ -183,7 +188,11 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
         .cloned()
         .chain(new_side_paths.iter().map(|p| p.to_string()))
         .collect();
-    let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?)?;
+    let filter = Filter::new(
+        git.root(),
+        git.linguist_attrs(&attr_paths)?,
+        opts.ignore_tests,
+    )?;
 
     // The universe is kept files only: a file the filter excludes exists
     // in no reference and no scoring pass.
@@ -342,7 +351,11 @@ pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
         .filter_map(|(p, b)| Some((p, b?)))
         .collect();
     let attr_paths: Vec<String> = contents.iter().map(|(p, _)| p.clone()).collect();
-    let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?)?;
+    let filter = Filter::new(
+        git.root(),
+        git.linguist_attrs(&attr_paths)?,
+        opts.ignore_tests,
+    )?;
     let kept: Vec<(&String, &[u8])> = contents
         .iter()
         .filter(|(p, c)| filter.exclusion(p, c).is_none())

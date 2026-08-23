@@ -2,9 +2,10 @@
 //! 1. `.gitattributes` linguist-generated / -vendored / -documentation
 //! 2. binary detection on content (UTF-16/32 aware)
 //! 3. ported linguist generated/vendored patterns
-//! 4. `.cxignore`
+//! 4. test files, when `--ignore-tests` asks for it
+//! 5. `.cxignore`
 //!
-//! The density backstop (layer 5) lives in the report, not here — it
+//! The density backstop (layer 6) lives in the report, not here — it
 //! flags, it doesn't drop.
 
 use std::collections::HashMap;
@@ -37,19 +38,57 @@ const LINGUIST_PATTERNS: [&str; 15] = [
     "node_modules/**",
 ];
 
+/// Test-file conventions across the languages cx is likely to meet.
+/// Directory names match at any depth; filename patterns are the ones
+/// each ecosystem's runner actually keys on, so they are as reliable as
+/// the runner's own discovery.
+/// Deliberately absent: `specs/**`. Plural "specs" is more often design
+/// documentation than RSpec-style tests (it swallowed 40 design docs and
+/// zero tests on a real repo); spec-named *files* are caught by the
+/// filename patterns wherever they live.
+const TEST_PATTERNS: [&str; 15] = [
+    // Directories a test runner owns wholesale.
+    "test/**",
+    "tests/**",
+    "spec/**",
+    "e2e/**",
+    "__tests__/**",
+    "__mocks__/**",
+    "testdata/**",
+    // Filenames: Go/Rust/Gleam, Python, JS/TS, Ruby, JUnit-style.
+    "*_test.*",
+    "*_tests.*",
+    "test_*.*",
+    "*.test.*",
+    "*.spec.*",
+    "*_spec.*",
+    "conftest.py",
+    "*Test.java",
+];
+
 pub struct Filter {
     attrs: HashMap<String, LinguistAttrs>,
     patterns: GlobSet,
+    tests: Option<GlobSet>,
     cxignore: Option<Gitignore>,
 }
 
+/// Build a set matching each pattern at the repo root and at any depth.
+fn glob_set(patterns: &[&str]) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(Glob::new(pattern)?);
+        builder.add(Glob::new(&format!("**/{pattern}"))?);
+    }
+    Ok(builder.build()?)
+}
+
 impl Filter {
-    pub fn new(root: &Path, attrs: HashMap<String, LinguistAttrs>) -> Result<Self> {
-        let mut builder = GlobSetBuilder::new();
-        for pattern in LINGUIST_PATTERNS {
-            builder.add(Glob::new(pattern)?);
-            builder.add(Glob::new(&format!("**/{pattern}"))?);
-        }
+    pub fn new(
+        root: &Path,
+        attrs: HashMap<String, LinguistAttrs>,
+        ignore_tests: bool,
+    ) -> Result<Self> {
         let cxignore_path = root.join(".cxignore");
         let cxignore = cxignore_path.exists().then(|| {
             let mut b = GitignoreBuilder::new(root);
@@ -58,7 +97,8 @@ impl Filter {
         });
         Ok(Filter {
             attrs,
-            patterns: builder.build()?,
+            patterns: glob_set(&LINGUIST_PATTERNS)?,
+            tests: ignore_tests.then(|| glob_set(&TEST_PATTERNS)).transpose()?,
             cxignore: cxignore.transpose()?,
         })
     }
@@ -83,6 +123,9 @@ impl Filter {
         if self.patterns.is_match(path) {
             return Some("generated/vendored pattern");
         }
+        if self.tests.as_ref().is_some_and(|t| t.is_match(path)) {
+            return Some("test");
+        }
         if let Some(ig) = &self.cxignore
             && ig.matched(path, false).is_ignore()
         {
@@ -97,7 +140,7 @@ mod tests {
     use super::*;
 
     fn filter() -> Filter {
-        Filter::new(Path::new("/nonexistent"), HashMap::new()).unwrap()
+        Filter::new(Path::new("/nonexistent"), HashMap::new(), false).unwrap()
     }
 
     #[test]
@@ -143,7 +186,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let f = Filter::new(Path::new("/nonexistent"), attrs).unwrap();
+        let f = Filter::new(Path::new("/nonexistent"), attrs, false).unwrap();
         assert_eq!(
             f.exclusion("src/schema.rs", b"code"),
             Some("linguist-generated")
@@ -155,5 +198,55 @@ mod tests {
     fn keeps_ordinary_code() {
         let f = filter();
         assert_eq!(f.exclusion("src/main.rs", b"fn main() {}"), None);
+    }
+
+    #[test]
+    fn keeps_tests_unless_asked_to_ignore_them() {
+        let f = filter();
+        for path in ["tests/e2e.rs", "src/parser_test.go", "web/app.spec.ts"] {
+            assert_eq!(f.exclusion(path, b"code"), None, "{path} kept by default");
+        }
+    }
+
+    #[test]
+    fn ignores_test_conventions_across_ecosystems() {
+        let f = Filter::new(Path::new("/nonexistent"), HashMap::new(), true).unwrap();
+        for path in [
+            "tests/end_to_end.rs",
+            "crates/cx-cli/tests/e2e.rs",
+            "test/helper.js",
+            "web/e2e/login.spec.js",
+            "spec/models/user_spec.rb",
+            "src/__tests__/button.tsx",
+            "src/parser_test.go",
+            "app/views_test.gleam",
+            "api/test_client.py",
+            "api/conftest.py",
+            "ui/Button.test.tsx",
+            // Test *support* counts as test: it exists only for tests,
+            // and the skipped list makes the call visible.
+            "crates/store/src/test_helpers.rs",
+            "pkg/testdata/sample.json",
+            "src/main/java/FooTest.java",
+        ] {
+            assert_eq!(f.exclusion(path, b"code"), Some("test"), "{path}");
+        }
+    }
+
+    #[test]
+    fn ignoring_tests_spares_production_code() {
+        let f = Filter::new(Path::new("/nonexistent"), HashMap::new(), true).unwrap();
+        for path in [
+            "src/main.rs",
+            "src/testing.rs",      // not a test: no separator
+            "src/latest.rs",       // substring "test" mid-word
+            "src/contest_view.rs", // ditto
+            "src/protest.py",
+            // Plural "specs" is design documentation far more often than
+            // it is tests — a real repo had 40 of these and zero tests.
+            "docs/specs/2026-05-01-relay-design.md",
+        ] {
+            assert_eq!(f.exclusion(path, b"code"), None, "{path}");
+        }
     }
 }

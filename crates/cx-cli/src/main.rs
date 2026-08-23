@@ -30,6 +30,9 @@ struct OverviewArgs {
     /// Hide the per-file breakdown; show summary lines only.
     #[arg(long)]
     no_files: bool,
+    /// Exclude test files (tests/, *_test.*, *.spec.*, …) everywhere.
+    #[arg(long)]
+    ignore_tests: bool,
     /// Show only the N biggest files/directories in the breakdown.
     #[arg(short = 'n', long, default_value_t = 30)]
     top: usize,
@@ -49,6 +52,9 @@ enum Cmd {
         staged: bool,
         #[arg(long, value_enum, default_value = "file")]
         granularity: Granularity,
+        /// Exclude test files (tests/, *_test.*, *.spec.*, …) from the diff.
+        #[arg(long)]
+        ignore_tests: bool,
         /// Show only the N biggest files/directories in the breakdown.
         #[arg(short = 'n', long, default_value_t = 30)]
         top: usize,
@@ -60,6 +66,9 @@ enum Cmd {
         /// Hide per-file contributions.
         #[arg(long)]
         no_files: bool,
+        /// Exclude test files (tests/, *_test.*, *.spec.*, …) from C(tree).
+        #[arg(long)]
+        ignore_tests: bool,
         /// Show only the N biggest files/directories in the breakdown.
         #[arg(short = 'n', long, default_value_t = 30)]
         top: usize,
@@ -94,6 +103,7 @@ fn main() -> Result<()> {
                 &git,
                 &AbsOptions {
                     with_files: !o.no_files,
+                    ignore_tests: o.ignore_tests,
                 },
             )?;
             let diff = pipeline::diff(
@@ -101,6 +111,7 @@ fn main() -> Result<()> {
                 &DiffOptions {
                     base: o.base,
                     staged: o.staged,
+                    ignore_tests: o.ignore_tests,
                 },
             )?;
             let rendered = if o.no_files {
@@ -122,17 +133,26 @@ fn main() -> Result<()> {
             base,
             staged,
             granularity,
+            ignore_tests,
             top,
             json,
         }) => {
             if matches!(granularity, Granularity::Hunk) {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
-            let report = pipeline::diff(&git, &DiffOptions { base, staged })?;
+            let report = pipeline::diff(
+                &git,
+                &DiffOptions {
+                    base,
+                    staged,
+                    ignore_tests,
+                },
+            )?;
             emit(json, &report, report::render_diff(&report, top))?;
         }
         Some(Cmd::Abs {
             no_files,
+            ignore_tests,
             top,
             json,
         }) => {
@@ -140,6 +160,7 @@ fn main() -> Result<()> {
                 &git,
                 &AbsOptions {
                     with_files: !no_files,
+                    ignore_tests,
                 },
             )?;
             emit(json, &report, report::render_abs(&report, top))?;
