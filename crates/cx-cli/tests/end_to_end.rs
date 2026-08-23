@@ -191,6 +191,59 @@ fn ignore_tests_excludes_tests_from_scoring() {
     );
 }
 
+/// The environment default, exercised through the real binary: the flag
+/// is only worth pinning if the pinned value actually reaches scoring,
+/// and if a single run can still override it.
+#[test]
+fn ignore_tests_can_be_pinned_through_the_environment() {
+    let (dir, _git) = setup();
+    let run = |env: &[(&str, &str)], args: &[&str]| -> serde_json::Value {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+        cmd.current_dir(dir.path()).arg("diff").arg("--json");
+        cmd.args(args);
+        // Inherited settings must not decide the outcome of this test.
+        cmd.env_remove("CX_IGNORE_TESTS");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "cx failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let ignored = |report: &serde_json::Value| {
+        report["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["path"] == "tests/novel_test.rs" && s["reason"] == "test")
+    };
+
+    assert!(!ignored(&run(&[], &[])), "off by default");
+    assert!(ignored(&run(&[("CX_IGNORE_TESTS", "1")], &[])), "pinned on");
+    assert!(
+        ignored(&run(&[("CX_IGNORE_TESTS", "true")], &[])),
+        "word form"
+    );
+    // A bare `--ignore-tests` env var must not mean "true" regardless of
+    // its value: pinning it off has to work too.
+    assert!(
+        !ignored(&run(&[("CX_IGNORE_TESTS", "0")], &[])),
+        "pinned off stays off"
+    );
+    assert!(
+        !ignored(&run(&[("CX_IGNORE_TESTS", "1")], &["--ignore-tests=false"])),
+        "one run can override the pinned default"
+    );
+    assert!(
+        ignored(&run(&[], &["--ignore-tests"])),
+        "the bare flag still works"
+    );
+}
+
 #[test]
 fn staged_mode_scores_the_index() {
     let (dir, git) = setup();

@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use cx_cli::git::Git;
@@ -14,66 +15,88 @@ use cx_cli::report;
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
+    /// Hide the per-file breakdown; show summary lines only.
+    #[arg(long)]
+    no_files: bool,
     #[command(flatten)]
-    overview: OverviewArgs,
+    diff: DiffArgs,
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
-/// Flags for the default (no-subcommand) overview.
+/// Flags every view accepts, declared once so a default pinned through
+/// the environment means the same thing in all of them.
 #[derive(Args)]
-struct OverviewArgs {
-    /// Base ref for the diff (default: main/master merge-base).
+struct CommonArgs {
+    /// Exclude test files everywhere: no reference, no scoring, listed
+    /// as skipped. Detected by naming convention, not by language.
+    ///
+    /// Accepts a value so an environment default can be turned back off
+    /// for one run: `--ignore-tests=false`.
+    #[arg(
+        long,
+        env = "CX_IGNORE_TESTS",
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = BoolishValueParser::new(),
+    )]
+    ignore_tests: bool,
+    /// Show only the N biggest files/directories in the breakdown.
+    #[arg(short = 'n', long, env = "CX_TOP", default_value_t = 30)]
+    top: usize,
     #[arg(long)]
+    json: bool,
+}
+
+/// Flags that select what to diff.
+#[derive(Args)]
+struct DiffArgs {
+    /// Base ref to diff against (default: main/master merge-base).
+    #[arg(long, env = "CX_BASE")]
     base: Option<String>,
     /// Diff the index instead of HEAD.
     #[arg(long)]
     staged: bool,
-    /// Hide the per-file breakdown; show summary lines only.
-    #[arg(long)]
-    no_files: bool,
-    /// Exclude test files (tests/, *_test.*, *.spec.*, …) everywhere.
-    #[arg(long)]
-    ignore_tests: bool,
-    /// Show only the N biggest files/directories in the breakdown.
-    #[arg(short = 'n', long, default_value_t = 30)]
-    top: usize,
-    #[arg(long)]
-    json: bool,
+}
+
+impl DiffArgs {
+    fn options(self, common: &CommonArgs) -> DiffOptions {
+        DiffOptions {
+            base: self.base,
+            staged: self.staged,
+            ignore_tests: common.ignore_tests,
+        }
+    }
+}
+
+impl CommonArgs {
+    fn abs_options(&self, no_files: bool) -> AbsOptions {
+        AbsOptions {
+            with_files: !no_files,
+            ignore_tests: self.ignore_tests,
+        }
+    }
 }
 
 #[derive(Subcommand)]
 enum Cmd {
     /// Score the changes between a base branch and HEAD (or the index).
     Diff {
-        /// Base ref to diff against (default: main/master merge-base).
-        #[arg(long)]
-        base: Option<String>,
-        /// Diff the index instead of HEAD.
-        #[arg(long)]
-        staged: bool,
+        #[command(flatten)]
+        diff: DiffArgs,
         #[arg(long, value_enum, default_value = "file")]
         granularity: Granularity,
-        /// Exclude test files (tests/, *_test.*, *.spec.*, …) from the diff.
-        #[arg(long)]
-        ignore_tests: bool,
-        /// Show only the N biggest files/directories in the breakdown.
-        #[arg(short = 'n', long, default_value_t = 30)]
-        top: usize,
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        common: CommonArgs,
     },
     /// Absolute C(tree) of HEAD — the trend-line number.
     Abs {
         /// Hide per-file contributions.
         #[arg(long)]
         no_files: bool,
-        /// Exclude test files (tests/, *_test.*, *.spec.*, …) from C(tree).
-        #[arg(long)]
-        ignore_tests: bool,
-        /// Show only the N biggest files/directories in the breakdown.
-        #[arg(short = 'n', long, default_value_t = 30)]
-        top: usize,
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        common: CommonArgs,
     },
 }
 
@@ -98,72 +121,46 @@ fn main() -> Result<()> {
     let git = Git::discover()?;
     match cli.cmd {
         None => {
-            let o = cli.overview;
-            let abs = pipeline::abs(
-                &git,
-                &AbsOptions {
-                    with_files: !o.no_files,
-                    ignore_tests: o.ignore_tests,
-                },
-            )?;
-            let diff = pipeline::diff(
-                &git,
-                &DiffOptions {
-                    base: o.base,
-                    staged: o.staged,
-                    ignore_tests: o.ignore_tests,
-                },
-            )?;
-            let rendered = if o.no_files {
+            let common = cli.common;
+            let abs = pipeline::abs(&git, &common.abs_options(cli.no_files))?;
+            let diff = pipeline::diff(&git, &cli.diff.options(&common))?;
+            let rendered = if cli.no_files {
                 format!(
                     "{}\n{}",
-                    report::render_abs(&abs, o.top),
-                    report::render_diff(&diff, o.top)
+                    report::render_abs(&abs, common.top),
+                    report::render_diff(&diff, common.top)
                 )
             } else {
-                report::render_overview(&abs, &diff, o.top)
+                report::render_overview(&abs, &diff, common.top)
             };
             emit(
-                o.json,
+                common.json,
                 &serde_json::json!({ "abs": abs, "diff": diff }),
                 rendered,
             )?;
         }
         Some(Cmd::Diff {
-            base,
-            staged,
+            diff,
             granularity,
-            ignore_tests,
-            top,
-            json,
+            common,
         }) => {
             if matches!(granularity, Granularity::Hunk) {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
-            let report = pipeline::diff(
-                &git,
-                &DiffOptions {
-                    base,
-                    staged,
-                    ignore_tests,
-                },
+            let report = pipeline::diff(&git, &diff.options(&common))?;
+            emit(
+                common.json,
+                &report,
+                report::render_diff(&report, common.top),
             )?;
-            emit(json, &report, report::render_diff(&report, top))?;
         }
-        Some(Cmd::Abs {
-            no_files,
-            ignore_tests,
-            top,
-            json,
-        }) => {
-            let report = pipeline::abs(
-                &git,
-                &AbsOptions {
-                    with_files: !no_files,
-                    ignore_tests,
-                },
+        Some(Cmd::Abs { no_files, common }) => {
+            let report = pipeline::abs(&git, &common.abs_options(no_files))?;
+            emit(
+                common.json,
+                &report,
+                report::render_abs(&report, common.top),
             )?;
-            emit(json, &report, report::render_abs(&report, top))?;
         }
     }
     Ok(())

@@ -45,6 +45,11 @@ cx abs   [-n <N>] [--no-files] [--json]       # absolute C(tree): the trend-line
 cx diff --ignore-tests
 ```
 
+Defaults can be pinned through the environment — `CX_IGNORE_TESTS=1`,
+`CX_TOP=15`, `CX_BASE=develop` — and any single run can still override
+them on the command line (`--ignore-tests=false`, `-n 50`). `cx --help`
+lists which variable backs each flag.
+
 The tree breakdown is dust-style: contributions aggregate up the
 directory tree, only the `-n` globally biggest files/directories are
 shown (default 30), and everything pruned collapses into a per-directory
