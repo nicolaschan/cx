@@ -83,12 +83,6 @@ impl CommonArgs {
         }
     }
 
-    fn progress(&self) -> Progress {
-        Progress {
-            visible: std::io::stderr().is_terminal(),
-        }
-    }
-
     /// The one place that asks where the output is going: the renderer
     /// takes the answer as an input rather than sniffing it itself.
     fn report_options(&self) -> report::Options {
@@ -138,11 +132,14 @@ fn emit<T: serde::Serialize>(json: bool, value: &T, rendered: String) -> Result<
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let git = Git::discover()?;
+    let progress = Progress {
+        visible: std::io::stderr().is_terminal(),
+    };
     match cli.cmd {
         None => {
             let common = cli.common;
-            let abs = pipeline::abs(&git, &common.abs_options(), common.progress())?;
-            let diff = pipeline::diff(&git, &cli.diff.options(&common), common.progress())?;
+            let abs = pipeline::abs(&git, &common.abs_options(), progress)?;
+            let diff = pipeline::diff(&git, &cli.diff.options(&common), progress)?;
             emit(
                 common.json,
                 &serde_json::json!({ "abs": abs, "diff": diff }),
@@ -157,7 +154,7 @@ fn main() -> Result<()> {
             if matches!(granularity, Granularity::Hunk) {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
-            let report = pipeline::diff(&git, &diff.options(&common), common.progress())?;
+            let report = pipeline::diff(&git, &diff.options(&common), progress)?;
             emit(
                 common.json,
                 &report,
@@ -165,7 +162,7 @@ fn main() -> Result<()> {
             )?;
         }
         Some(Cmd::Abs { common }) => {
-            let report = pipeline::abs(&git, &common.abs_options(), common.progress())?;
+            let report = pipeline::abs(&git, &common.abs_options(), progress)?;
             emit(
                 common.json,
                 &report,

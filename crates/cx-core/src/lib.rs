@@ -35,14 +35,12 @@ pub struct SeqScore {
     pub rescaled: f64,
 }
 
-/// Result of an attribution: per-item scores, the joint they are rescaled
-/// to sum to, and the scale factor, which doubles as a noise gauge
-/// (≈ 1.0 → trust per-item attribution).
+/// Result of [`rescale`]: per-item scores plus the scale factor, which
+/// doubles as a noise gauge (≈ 1.0 → trust per-item attribution).
 #[derive(Clone, Debug)]
 pub struct Rescaled {
     pub scores: Vec<SeqScore>,
     pub scale: f64,
-    /// C(all items | reference): the rescale target.
     pub joint: u64,
 }
 
@@ -71,13 +69,11 @@ pub fn rescale(raw: &[u64], joint: u64) -> Rescaled {
     }
 }
 
-/// Receives each compression's cost as it finishes. Over one run the
-/// calls sum to the run's [`Attribution::cost`].
+/// Receives each compression's cost as it finishes.
 pub trait Progress: Sync {
     fn advance(&self, bytes: u64);
 }
 
-/// No progress reporting.
 pub struct Silent;
 
 impl Progress for Silent {
@@ -136,14 +132,11 @@ impl Scorer {
         out
     }
 
-    /// C(input | reference): one compression, the primitive every score
-    /// is built from. An empty reference gives the absolute C(input).
+    /// C(input | reference): one compression.
     pub fn score(&self, reference: &[u8], input: &[u8]) -> u64 {
         self.compress(&mut CCtx::create(), reference, input)
     }
 
-    /// The compressions behind attributing `items` to `reference`, laid
-    /// out and ready to [`run`](Attribution::run).
     pub fn attribution<'s>(&'s self, reference: &[u8], items: &[&[u8]]) -> Attribution<'s> {
         let grown: usize = items.iter().map(|i| i.len() + SEPARATOR.len()).sum();
         let mut buffer = Vec::with_capacity(reference.len() + grown);
@@ -171,9 +164,9 @@ impl Scorer {
         };
         set(cctx, CParameter::CompressionLevel(self.level));
         // Determinism by construction, not by libzstd's default: MT zstd
-        // changes output sizes, and so does a prefix that happens to sit
-        // adjacent to its input in memory.
+        // changes output sizes.
         set(cctx, CParameter::NbWorkers(0));
+        // So does a prefix adjacent to its input in memory.
         set(cctx, CParameter::DeterministicRefPrefix(true));
         set(cctx, CParameter::EnableLongDistanceMatching(true));
         set(
@@ -203,13 +196,12 @@ impl Scorer {
     }
 }
 
-/// One attribution's compressions, over a single buffer:
-/// `reference ++ item₀ ++ SEP ++ item₁ ++ SEP …`. Each input is scored
-/// against everything before it in the buffer: item i against the
-/// reference and earlier items (the chain rule: a pattern repeated
-/// across items is charged to its first occurrence), and last, all
-/// items jointly against the reference. No compression reads another's
-/// result, so they all run at once.
+/// The independent compressions behind attributing `items` to
+/// `reference`, over one buffer `reference ++ item₀ ++ SEP ++ item₁ …`:
+/// C(item_i | reference ++ items[..i]) for each item — sequential
+/// chain-rule scoring, so a pattern repeated across items is charged
+/// to its first occurrence and near-free afterwards — and last,
+/// C(all items jointly | reference), the rescale target.
 pub struct Attribution<'s> {
     scorer: &'s Scorer,
     buffer: Vec<u8>,
@@ -217,17 +209,10 @@ pub struct Attribution<'s> {
 }
 
 impl Attribution<'_> {
-    /// Bytes zstd indexes and compresses for `input`: its prefix plus
-    /// itself.
-    fn cost_of(input: &Range<usize>) -> u64 {
-        input.end as u64
-    }
-
-    /// Total [`cost_of`](Self::cost_of) over every input: the unit
-    /// progress advances in, so a bar over it tracks wall-clock rather
-    /// than item count.
+    /// Bytes zstd indexes over every input (each one's prefix plus
+    /// itself): the unit progress advances in.
     pub fn cost(&self) -> u64 {
-        self.inputs.iter().map(Self::cost_of).sum()
+        self.inputs.iter().map(|input| input.end as u64).sum()
     }
 
     pub fn run(&self, progress: &dyn Progress) -> Rescaled {
@@ -236,46 +221,44 @@ impl Attribution<'_> {
     }
 }
 
-/// Run every compression of every attribution as one parallel batch:
-/// longest job first so the tail stays short, one zstd context per
-/// worker rather than a fresh one (and its ~80 MB of zeroed tables)
-/// per job. Results land in the same order as `plans`.
+/// Every compression of every attribution as one parallel batch: longest
+/// job first so the tail stays short, zstd contexts (~80 MB of tables
+/// each) pooled rather than created per job.
 pub fn run_all<const N: usize>(
     plans: [&Attribution<'_>; N],
     progress: &dyn Progress,
 ) -> [Rescaled; N] {
-    let mut jobs: Vec<(usize, usize)> = (0..N)
-        .flat_map(|p| (0..plans[p].inputs.len()).map(move |i| (p, i)))
+    let mut sizes = plans.map(|plan| vec![0; plan.inputs.len()]);
+    let mut jobs: Vec<_> = plans
+        .iter()
+        .zip(&mut sizes)
+        .flat_map(|(&plan, sizes)| {
+            plan.inputs
+                .iter()
+                .zip(sizes)
+                .map(move |(input, size)| (plan, input, size))
+        })
         .collect();
-    jobs.sort_by_key(|&(p, i)| Reverse(Attribution::cost_of(&plans[p].inputs[i])));
+    jobs.sort_by_key(|(_, input, _)| Reverse(input.end));
 
     let contexts = Mutex::new(Vec::new());
-    let scored: Vec<u64> = jobs
-        .par_iter()
+    jobs.into_par_iter()
         .with_max_len(1)
-        .map(|&(p, i)| {
-            let plan = plans[p];
-            let input = &plan.inputs[i];
+        .for_each(|(plan, input, size)| {
             let mut cctx = contexts
                 .lock()
                 .expect("pool")
                 .pop()
                 .unwrap_or_else(CCtx::create);
-            let size = plan.scorer.compress(
+            *size = plan.scorer.compress(
                 &mut cctx,
                 &plan.buffer[..input.start],
                 &plan.buffer[input.clone()],
             );
             contexts.lock().expect("pool").push(cctx);
-            progress.advance(Attribution::cost_of(input));
-            size
-        })
-        .collect();
+            progress.advance(input.end as u64);
+        });
 
-    let mut sizes = plans.map(|plan| vec![0; plan.inputs.len()]);
-    for (&(p, i), size) in jobs.iter().zip(scored) {
-        sizes[p][i] = size;
-    }
     sizes.map(|sizes| {
         let (joint, raw) = sizes.split_last().expect("the joint");
         rescale(raw, *joint)

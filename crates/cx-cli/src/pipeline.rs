@@ -272,8 +272,8 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
     let remainder_ref = assemble(&remainder);
 
     // The three passes (plan §3): metric 1 against the full old tree,
-    // metric 2 as new-vs-old against the neutral remainder, each with its
-    // joint as the rescale target — one parallel batch.
+    // metric 2 as new-vs-old against the neutral remainder, metric 3 as
+    // joint compressions that are also the rescale targets.
     let new_items: Vec<&[u8]> = items.iter().filter_map(|i| i.new.as_deref()).collect();
     let old_items: Vec<&[u8]> = items.iter().filter_map(|i| i.old.as_deref()).collect();
 
@@ -364,8 +364,7 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
 
     // Per-file contribution: the chain rule over sorted paths against an
     // empty reference — the same attribution machinery as diff scoring,
-    // with C(tree) itself as the rescale target. Without files, C(tree)
-    // is one compression with nothing to attribute.
+    // with C(tree) itself as the rescale target.
     let scorer = Scorer::default();
     let scored = if opts.no_files {
         let _spinner = progress.spinner("C(tree)");
