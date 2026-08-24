@@ -4,7 +4,7 @@
 //! comparable with previously recorded ones. Bump deliberately, alongside
 //! the zstd version bump, never to "fix" a failure.
 
-use cx_core::{Scorer, Silent, zstd_version};
+use cx_core::{Scorer, zstd_version};
 
 const REFERENCE: &[u8] = b"fn add(a: u32, b: u32) -> u32 { a + b }\n\
 fn sub(a: u32, b: u32) -> u32 { a - b }\n\
@@ -28,7 +28,7 @@ fn golden_scores() {
     assert_eq!(s.score(&[], NOVEL), 83);
     let attributed = s
         .attribution(REFERENCE, &[NOVEL, CONVENTIONAL])
-        .run(&Silent);
+        .run(&|_| {});
     let raw: Vec<u64> = attributed.scores.iter().map(|sc| sc.raw).collect();
     assert_eq!(raw, [77, 19]);
     assert_eq!(attributed.joint, 103);

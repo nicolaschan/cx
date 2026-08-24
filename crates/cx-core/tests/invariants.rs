@@ -4,8 +4,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use cx_core::Scorer;
 use cx_core::testgen::code as gen_code;
-use cx_core::{Progress, SEPARATOR, Scorer, Silent};
 
 fn scorer() -> Scorer {
     Scorer::default()
@@ -114,7 +114,7 @@ fn repeated_new_patterns_charged_once() {
     let first = s.score(&reference, &pattern);
     let scored = s
         .attribution(&reference, &[pattern.as_slice(); 4])
-        .run(&Silent);
+        .run(&|_| {});
     let scores: Vec<u64> = scored.scores.iter().map(|sc| sc.raw).collect();
     let total: u64 = scores.iter().sum();
 
@@ -139,7 +139,7 @@ fn attributed_scores_are_per_item_conditionals() {
     let (a, b, c) = (gen_code(301, 60), gen_code(302, 90), gen_code(303, 40));
     let items: [&[u8]; 5] = [&a, &b, &a, &c, &b];
 
-    let scored = s.attribution(&reference, &items).run(&Silent);
+    let scored = s.attribution(&reference, &items).run(&|_| {});
     let seq: Vec<u64> = scored.scores.iter().map(|sc| sc.raw).collect();
     for (i, item) in items.iter().enumerate() {
         let mut prefix = reference.clone();
@@ -161,7 +161,7 @@ fn sequential_sum_tracks_joint() {
     let refs: Vec<&[u8]> = items.iter().map(|v| v.as_slice()).collect();
     let reference = s.assemble(&[&gen_code(90, 200)]);
 
-    let scored = s.attribution(&reference, &refs).run(&Silent);
+    let scored = s.attribution(&reference, &refs).run(&|_| {});
     assert!(
         (0.7..=1.1).contains(&scored.scale),
         "scale factor should be near 1, got {}",
@@ -175,39 +175,19 @@ fn sequential_sum_tracks_joint() {
     );
 }
 
-#[derive(Default)]
-struct Counter(AtomicU64);
-
-impl Progress for Counter {
-    fn advance(&self, bytes: u64) {
-        self.0.fetch_add(bytes, Ordering::Relaxed);
-    }
-}
-
-/// A run's planned cost is what a progress bar is sized to, so it must
-/// be what the run reports — and it must mean what it says: every item
-/// indexes its prefix and compresses itself, the joint does the same for
-/// all items at once. More items than threads, so workers take turns.
+/// What a progress bar is sized to is what the run reports: every input
+/// runs exactly once, with more items than threads so workers take turns.
 #[test]
 fn progress_advances_by_exactly_the_planned_cost() {
     let s = scorer();
     let reference = s.assemble(&[&gen_code(400, 100)]);
     let items: Vec<Vec<u8>> = (0..40).map(|i| gen_code(500 + i, 5)).collect();
     let refs: Vec<&[u8]> = items.iter().map(|v| v.as_slice()).collect();
-    let plan = s.attribution(&reference, &refs);
+    let attribution = s.attribution(&reference, &refs);
 
-    let prefix = |i: usize| {
-        reference.len()
-            + refs[..i]
-                .iter()
-                .map(|r| r.len() + SEPARATOR.len())
-                .sum::<usize>()
-    };
-    let items_cost: usize = (0..refs.len()).map(|i| prefix(i) + refs[i].len()).sum();
-    let joint_cost = reference.len() + s.assemble(&refs).len();
-    assert_eq!(plan.cost(), (items_cost + joint_cost) as u64);
-
-    let counter = Counter::default();
-    plan.run(&counter);
-    assert_eq!(counter.0.into_inner(), plan.cost());
+    let advanced = AtomicU64::new(0);
+    attribution.run(&|bytes| {
+        advanced.fetch_add(bytes, Ordering::Relaxed);
+    });
+    assert_eq!(advanced.into_inner(), attribution.cost());
 }

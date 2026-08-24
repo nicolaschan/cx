@@ -71,7 +71,7 @@ fn scores_a_realistic_branch() {
             side: Side::Head,
             ..Default::default()
         },
-        Progress::hidden(),
+        Progress::default(),
     )
     .unwrap();
 
@@ -139,7 +139,7 @@ fn scores_a_realistic_branch() {
 #[test]
 fn line_churn_counts_what_git_counts() {
     let (_dir, git) = setup();
-    let report = pipeline::diff(&git, &DiffOptions::default(), Progress::hidden()).unwrap();
+    let report = pipeline::diff(&git, &DiffOptions::default(), Progress::default()).unwrap();
     assert_eq!(
         (report.totals.added_lines, report.totals.deleted_lines),
         (240, 120)
@@ -152,7 +152,7 @@ fn line_churn_counts_what_git_counts() {
             ignore_tests: true,
             ..Default::default()
         },
-        Progress::hidden(),
+        Progress::default(),
     )
     .unwrap();
     assert_eq!(
@@ -173,7 +173,7 @@ fn ignoring_tests_drops_their_cost_and_leaves_the_rest() {
                 ignore_tests,
                 ..Default::default()
             },
-            Progress::hidden(),
+            Progress::default(),
         )
         .unwrap()
     };
@@ -263,7 +263,7 @@ fn staged_mode_scores_the_index() {
             side: Side::Index,
             ..Default::default()
         },
-        Progress::hidden(),
+        Progress::default(),
     )
     .unwrap();
     let staged = report.files.iter().find(|f| f.path == "src/staged.rs");
@@ -282,7 +282,7 @@ fn tree_reports_absolute_complexity_with_contributions() {
             side: Side::Head,
             ..Default::default()
         },
-        Progress::hidden(),
+        Progress::default(),
     )
     .unwrap();
     // keep.rs + moved.rs + novel.rs + tests/novel_test.rs;
@@ -308,19 +308,34 @@ fn tree_reports_absolute_complexity_with_contributions() {
 #[test]
 fn tree_contributions_are_suppressable() {
     let (_dir, git) = setup();
+    let side = Side::Head;
+    let full = pipeline::abs(
+        &git,
+        &AbsOptions {
+            side,
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
     let report = pipeline::abs(
         &git,
         &AbsOptions {
             no_files: true,
-            side: Side::Head,
+            side: side,
             ..Default::default()
         },
-        Progress::hidden(),
+        Progress::default(),
     )
     .unwrap();
     assert_eq!(report.file_count, 4);
     assert!(report.files.is_empty());
     assert_eq!(report.scale, 1.0);
+    assert_eq!(
+        (report.compressed_bytes, report.raw_bytes),
+        (full.compressed_bytes, full.raw_bytes),
+        "one joint compression is the same C(tree) either way"
+    );
 }
 
 #[test]
@@ -343,7 +358,7 @@ fn worktree_side_scores_the_whole_working_tree() {
             side: Side::Worktree,
             ..Default::default()
         },
-        Progress::hidden(),
+        Progress::default(),
     )
     .unwrap();
     let scored = |p: &str| report.files.iter().find(|f| f.path == p);
@@ -369,7 +384,7 @@ fn worktree_side_scores_the_whole_working_tree() {
             side: Side::Index,
             ..Default::default()
         },
-        Progress::hidden(),
+        Progress::default(),
     )
     .unwrap();
     let staged_paths: Vec<&str> = staged_only.files.iter().map(|f| f.path.as_str()).collect();
@@ -397,7 +412,7 @@ fn abs_measures_the_snapshot_it_is_asked_for() {
                 side,
                 ..Default::default()
             },
-            Progress::hidden(),
+            Progress::default(),
         )
         .unwrap();
         let mut paths: Vec<String> = report.files.iter().map(|f| f.path.clone()).collect();
@@ -480,7 +495,7 @@ fn an_unmerged_path_is_scored_once() {
             side: Side::Worktree,
             ..Default::default()
         },
-        Progress::hidden(),
+        Progress::default(),
     )
     .unwrap();
     assert_eq!(
@@ -501,7 +516,7 @@ fn untracked_lines_reach_the_churn_totals() {
             side: Side::Head,
             ..Default::default()
         },
-        Progress::hidden(),
+        Progress::default(),
     )
     .unwrap();
 
@@ -512,7 +527,7 @@ fn untracked_lines_reach_the_churn_totals() {
             side: Side::Worktree,
             ..Default::default()
         },
-        Progress::hidden(),
+        Progress::default(),
     )
     .unwrap();
 

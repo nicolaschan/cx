@@ -126,6 +126,7 @@ pub struct AbsReport {
     pub version: VersionInfo,
     pub snapshot: &'static str,
     pub file_count: usize,
+    /// The kept files' sizes, summed.
     pub raw_bytes: u64,
     pub compressed_bytes: u64,
     /// Empty when contributions were suppressed.
@@ -249,35 +250,36 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
     items.sort_by(|a, b| a.path.cmp(&b.path));
 
     let scorer = Scorer::default();
-    let assemble = |paths: &[&str]| -> Vec<u8> {
-        scorer.assemble(
-            &paths
-                .iter()
-                .map(|p| old_tree[*p].as_slice())
-                .collect::<Vec<_>>(),
-        )
-    };
-    let old_tree_ref = assemble(&kept_tree);
-    let remainder: Vec<&str> = kept_tree
-        .iter()
-        .copied()
-        .filter(|p| !touched.contains(p))
-        .collect();
-    let remainder_ref = assemble(&remainder);
-
     // The three passes (plan §3): metric 1 against the full old tree,
     // metric 2 as new-vs-old against the neutral remainder, metric 3 as
     // joint compressions that are also the rescale targets.
     let new_items: Vec<&[u8]> = items.iter().filter_map(|i| i.new.as_deref()).collect();
     let old_items: Vec<&[u8]> = items.iter().filter_map(|i| i.old.as_deref()).collect();
 
-    let plans = [
-        scorer.attribution(&old_tree_ref, &new_items),
-        scorer.attribution(&remainder_ref, &new_items),
-        scorer.attribution(&remainder_ref, &old_items),
-    ];
-    let phase = progress.phase("diff", plans.iter().map(Attribution::cost).sum());
-    let [review, delta_new, delta_old] = run_all(plans.each_ref(), &phase);
+    let attributions = {
+        let assemble = |paths: &[&str]| -> Vec<u8> {
+            scorer.assemble(
+                &paths
+                    .iter()
+                    .map(|p| old_tree[*p].as_slice())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let old_tree_ref = assemble(&kept_tree);
+        let remainder: Vec<&str> = kept_tree
+            .iter()
+            .copied()
+            .filter(|p| !touched.contains(p))
+            .collect();
+        let remainder_ref = assemble(&remainder);
+        [
+            scorer.attribution(&old_tree_ref, &new_items),
+            scorer.attribution(&remainder_ref, &new_items),
+            scorer.attribution(&remainder_ref, &old_items),
+        ]
+    };
+    let phase = progress.phase("diff", attributions.iter().map(Attribution::cost).sum());
+    let [review, delta_new, delta_old] = run_all(attributions.each_ref(), &phase);
 
     let mut files = Vec::with_capacity(items.len());
     let (mut new_i, mut old_i) = (0, 0);
@@ -365,8 +367,8 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
         let _spinner = progress.spinner("C(tree)");
         rescale(&[], scorer.score(&[], &scorer.assemble(&kept_contents)))
     } else {
-        let plan = scorer.attribution(&[], &kept_contents);
-        plan.run(&progress.phase("C(tree)", plan.cost()))
+        let attribution = scorer.attribution(&[], &kept_contents);
+        attribution.run(&progress.phase("C(tree)", attribution.cost()))
     };
     let mut files: Vec<AbsFile> = kept
         .iter()

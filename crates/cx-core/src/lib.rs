@@ -35,8 +35,9 @@ pub struct SeqScore {
     pub rescaled: f64,
 }
 
-/// Result of [`rescale`]: per-item scores plus the scale factor, which
-/// doubles as a noise gauge (≈ 1.0 → trust per-item attribution).
+/// Result of [`rescale`]: per-item scores, the joint they sum to, and the
+/// scale factor, which doubles as a noise gauge (≈ 1.0 → trust per-item
+/// attribution).
 #[derive(Clone, Debug)]
 pub struct Rescaled {
     pub scores: Vec<SeqScore>,
@@ -67,17 +68,6 @@ pub fn rescale(raw: &[u64], joint: u64) -> Rescaled {
         scale,
         joint,
     }
-}
-
-/// Receives each compression's cost as it finishes.
-pub trait Progress: Sync {
-    fn advance(&self, bytes: u64);
-}
-
-pub struct Silent;
-
-impl Progress for Silent {
-    fn advance(&self, _: u64) {}
 }
 
 pub struct Scorer {
@@ -111,24 +101,23 @@ impl Scorer {
     }
 
     pub fn new(level: i32, max_window_log: u32) -> Self {
-        let mut scorer = Scorer {
+        // A scorer that subtracts nothing measures the overhead itself.
+        let raw = Scorer {
             level,
             max_window_log,
             empty_frame: 0,
         };
-        scorer.empty_frame = scorer.score(&[], &[]);
-        scorer
+        Scorer {
+            empty_frame: raw.score(&[], &[]),
+            ..raw
+        }
     }
 
     /// Join parts with [`SEPARATOR`]. Ordering policy belongs to the
     /// caller: pass parts already in the order they should appear.
     pub fn assemble(&self, parts: &[&[u8]]) -> Vec<u8> {
-        let total: usize = parts.iter().map(|p| p.len() + SEPARATOR.len()).sum();
-        let mut out = Vec::with_capacity(total);
-        for part in parts {
-            out.extend_from_slice(part);
-            out.extend_from_slice(SEPARATOR);
-        }
+        let mut out = Vec::new();
+        append(&mut out, parts);
         out
     }
 
@@ -139,20 +128,12 @@ impl Scorer {
 
     pub fn attribution<'s>(&'s self, reference: &[u8], items: &[&[u8]]) -> Attribution<'s> {
         let mut buffer = reference.to_vec();
-        let mut inputs: Vec<Range<usize>> = items
-            .iter()
-            .map(|item| {
-                let start = buffer.len();
-                buffer.extend_from_slice(item);
-                buffer.extend_from_slice(SEPARATOR);
-                start..start + item.len()
-            })
-            .collect();
-        inputs.push(reference.len()..buffer.len());
+        let items = append(&mut buffer, items);
         Attribution {
             scorer: self,
+            joint: reference.len()..buffer.len(),
             buffer,
-            inputs,
+            items,
         }
     }
 
@@ -194,73 +175,95 @@ impl Scorer {
     }
 }
 
+/// Append each part followed by [`SEPARATOR`], returning where each part
+/// landed.
+fn append(out: &mut Vec<u8>, parts: &[&[u8]]) -> Vec<Range<usize>> {
+    out.reserve(parts.iter().map(|p| p.len() + SEPARATOR.len()).sum());
+    parts
+        .iter()
+        .map(|part| {
+            let start = out.len();
+            out.extend_from_slice(part);
+            out.extend_from_slice(SEPARATOR);
+            start..start + part.len()
+        })
+        .collect()
+}
+
 /// The independent compressions behind attributing `items` to
 /// `reference`, over one buffer `reference ++ item₀ ++ SEP ++ item₁ …`:
 /// C(item_i | reference ++ items[..i]) for each item — the chain rule,
 /// so a pattern repeated across items is charged to its first
-/// occurrence and near-free afterwards — and last,
-/// C(all items jointly | reference), the rescale target.
+/// occurrence and near-free afterwards — and C(all items jointly |
+/// reference), the rescale target. Every input is scored against
+/// everything before it in the buffer.
 pub struct Attribution<'s> {
     scorer: &'s Scorer,
     buffer: Vec<u8>,
-    inputs: Vec<Range<usize>>,
+    items: Vec<Range<usize>>,
+    joint: Range<usize>,
+}
+
+/// Bytes zstd indexes for an input: its prefix plus itself.
+fn indexed(input: &Range<usize>) -> u64 {
+    input.end as u64
 }
 
 impl Attribution<'_> {
-    /// Bytes zstd indexes over every input (each one's prefix plus
-    /// itself): the unit progress advances in.
-    pub fn cost(&self) -> u64 {
-        self.inputs.iter().map(|input| input.end as u64).sum()
+    fn inputs(&self) -> impl Iterator<Item = &Range<usize>> {
+        self.items.iter().chain([&self.joint])
     }
 
-    pub fn run(&self, progress: &dyn Progress) -> Rescaled {
+    /// Bytes zstd indexes over every input: the unit progress advances in.
+    pub fn cost(&self) -> u64 {
+        self.inputs().map(indexed).sum()
+    }
+
+    pub fn run(&self, progress: &(dyn Fn(u64) + Sync)) -> Rescaled {
         let [scored] = run_all([self], progress);
         scored
     }
 }
 
 /// Every compression of every attribution as one parallel batch: longest
-/// job first so the tail stays short, zstd contexts (~80 MB of tables
-/// each) pooled rather than created per job.
+/// job first so the tail stays short, zstd contexts pooled rather than
+/// created per job. `progress` receives each compression's
+/// cost as it finishes.
 pub fn run_all<const N: usize>(
-    plans: [&Attribution<'_>; N],
-    progress: &dyn Progress,
+    attributions: [&Attribution<'_>; N],
+    progress: &(dyn Fn(u64) + Sync),
 ) -> [Rescaled; N] {
-    let mut sizes = plans.map(|plan| vec![0; plan.inputs.len()]);
-    let mut jobs: Vec<_> = plans
+    let mut slots = attributions.map(|a| (vec![0; a.items.len()], 0));
+    let mut jobs: Vec<_> = attributions
         .iter()
-        .zip(&mut sizes)
-        .flat_map(|(&plan, sizes)| {
-            plan.inputs
-                .iter()
-                .zip(sizes)
-                .map(move |(input, size)| (plan, input, size))
+        .zip(&mut slots)
+        .flat_map(|(&a, (items, joint))| {
+            a.inputs()
+                .zip(items.iter_mut().chain([joint]))
+                .map(move |(input, slot)| (a, input, slot))
         })
         .collect();
-    jobs.sort_by_key(|(_, input, _)| Reverse(input.end));
+    jobs.sort_by_key(|(_, input, _)| Reverse(indexed(input)));
 
     let contexts = Mutex::new(Vec::new());
     jobs.into_par_iter()
         .with_max_len(1)
-        .for_each(|(plan, input, size)| {
+        .for_each(|(a, input, slot)| {
             let mut cctx = contexts
                 .lock()
                 .expect("pool")
                 .pop()
                 .unwrap_or_else(CCtx::create);
-            *size = plan.scorer.compress(
+            *slot = a.scorer.compress(
                 &mut cctx,
-                &plan.buffer[..input.start],
-                &plan.buffer[input.clone()],
+                &a.buffer[..input.start],
+                &a.buffer[input.clone()],
             );
             contexts.lock().expect("pool").push(cctx);
-            progress.advance(input.end as u64);
+            progress(indexed(input));
         });
 
-    sizes.map(|sizes| {
-        let (joint, raw) = sizes.split_last().expect("the joint");
-        rescale(raw, *joint)
-    })
+    slots.map(|(items, joint)| rescale(&items, joint))
 }
 
 #[cfg(test)]
