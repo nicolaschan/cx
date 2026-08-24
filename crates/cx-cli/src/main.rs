@@ -11,7 +11,7 @@ use cx_cli::report;
 /// Score git trees and diffs by marginal description length: how much
 /// new information content adds, conditioned on what the codebase
 /// already contains. With no subcommand, shows one merged breakdown:
-/// the tree's complexity per file/directory plus the diff's ΔC.
+/// the tree's complexity per file/directory plus the diff's ΔCX.
 #[derive(Parser)]
 #[command(name = "cx", version)]
 struct Cli {
