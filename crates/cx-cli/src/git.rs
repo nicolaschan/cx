@@ -98,9 +98,8 @@ impl Git {
         Ok(split_nul(&out))
     }
 
-    /// One `git diff` of the scored range, in the requested format: the
-    /// listings below must describe the same diff, down to how renames
-    /// were detected.
+    /// One `git diff` of the scored range, NUL-split. Shared so the
+    /// listings below describe the same diff, renames included.
     fn diff(&self, format: &str, from: &str, staged: bool) -> Result<Vec<String>> {
         let mut args = vec!["diff", format, "-z", "--find-renames"];
         if staged {
@@ -158,16 +157,15 @@ impl Git {
     /// Lines (added, deleted) per path, as `git diff --numstat` counts
     /// them, keyed the way [`Git::changes`] keys a rename: by destination.
     pub fn line_counts(&self, from: &str, staged: bool) -> Result<HashMap<String, (u64, u64)>> {
-        // A binary file's counts are `-`; the filter drops those files
-        // before anything sums them, so parsing them as 0 is never seen.
+        // `-` for a binary file, which the filter drops before summing.
         let count = |s: &str| s.parse().unwrap_or(0);
         let mut counts = HashMap::new();
         let mut fields = self.diff("--numstat", from, staged)?.into_iter();
         while let Some(record) = fields.next() {
             let (added, rest) = record.split_once('\t').context("numstat without a tab")?;
             let (deleted, path) = rest.split_once('\t').context("numstat without a path")?;
-            // A rename leaves that path empty and follows the record with
-            // its source and then its destination.
+            // A rename leaves that path empty and follows with its
+            // source and then its destination.
             let path = if path.is_empty() {
                 fields.nth(1).context("rename without paths")?
             } else {

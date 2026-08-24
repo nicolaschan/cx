@@ -75,14 +75,12 @@ pub struct Skipped {
 pub struct Totals {
     pub review_bytes: u64,
     pub delta_bytes: i64,
-    /// Lines added and deleted over the scored files: the familiar size
-    /// beside the one this tool exists to report. Skipped files are not
-    /// in it, so it covers what the bytes above it cover.
+    /// Line churn over the same scored files the bytes above cover: the
+    /// familiar size beside the one this tool exists to report.
     pub added_lines: u64,
     pub deleted_lines: u64,
 }
 
-/// Lines by newline count: one measure wherever lines are reported.
 fn lines(content: &[u8]) -> u64 {
     content.iter().filter(|&&b| b == b'\n').count() as u64
 }
@@ -331,8 +329,6 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     flag_density_outliers(&mut files);
     files.sort_by(|a, b| b.review_bytes.total_cmp(&a.review_bytes));
 
-    // Churn over the same files the bytes above cover: a skipped file is
-    // absent from `items` and so absent from this too.
     let churn = git.line_counts(&merge_base, opts.staged)?;
     let (added_lines, deleted_lines) = items
         .iter()
