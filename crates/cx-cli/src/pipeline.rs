@@ -12,13 +12,25 @@ use crate::git::{Git, Side, Status};
 
 const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/master"];
 
-#[derive(Default)]
-pub struct DiffOptions {
-    pub base: Option<String>,
+/// What is scored: which snapshot, and which kinds of content count.
+#[derive(Clone, Copy, Default)]
+pub struct Scope {
     pub side: Side,
     /// Exclude test files from the universe entirely — they are then in
     /// no reference and no scoring pass, and appear as skipped.
     pub ignore_tests: bool,
+    /// Score comments too. Otherwise every blob is reduced to code before
+    /// it enters any reference or scoring pass.
+    pub comments: bool,
+    /// Score prose files (Markdown, reStructuredText, …) too. Otherwise
+    /// they appear as skipped.
+    pub prose: bool,
+}
+
+#[derive(Default)]
+pub struct DiffOptions {
+    pub base: Option<String>,
+    pub scope: Scope,
 }
 
 #[derive(Serialize)]
@@ -106,9 +118,7 @@ pub struct AbsOptions {
     /// Skip per-file contributions, leaving one joint compression —
     /// much faster on big trees.
     pub no_files: bool,
-    /// Exclude test files from the universe entirely.
-    pub ignore_tests: bool,
-    pub side: Side,
+    pub scope: Scope,
 }
 
 /// One file's contribution to C(tree): its sequential chain-rule score in
@@ -155,7 +165,7 @@ fn serialize_status<S: serde::Serializer>(status: &Status, s: S) -> Result<S::Ok
 pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     let base = resolve_base(git, opts.base.as_deref())?;
     let merge_base = git.merge_base(&base, "HEAD")?;
-    let changes = git.changes(&merge_base, opts.side)?;
+    let changes = git.changes(&merge_base, opts.scope.side)?;
 
     // Fetch the whole old tree plus the new side of every change.
     let tree_paths = git.ls_tree(&merge_base)?;
@@ -175,7 +185,7 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     let new_contents: HashMap<&str, Vec<u8>> = new_side_paths
         .iter()
         .copied()
-        .zip(git.contents(opts.side, &new_side_paths)?)
+        .zip(git.contents(opts.scope.side, &new_side_paths)?)
         .filter_map(|(p, b)| Some((p, b?)))
         .collect();
 
@@ -187,7 +197,7 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     let filter = Filter::new(
         git.root(),
         git.linguist_attrs(&attr_paths)?,
-        opts.ignore_tests,
+        opts.scope.ignore_tests,
     )?;
 
     // The universe is kept files only: a file the filter excludes exists
@@ -315,7 +325,7 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     flag_density_outliers(&mut files);
     files.sort_by(|a, b| b.review_bytes.total_cmp(&a.review_bytes));
 
-    let churn = git.line_counts(&merge_base, opts.side)?;
+    let churn = git.line_counts(&merge_base, opts.scope.side)?;
     let (added_lines, deleted_lines) = items
         .iter()
         .filter_map(|item| churn.get(&item.path))
@@ -342,19 +352,19 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
 }
 
 pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
-    let paths = git.list(opts.side)?;
+    let paths = git.list(opts.scope.side)?;
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     let contents: Vec<(String, Vec<u8>)> = paths
         .iter()
         .cloned()
-        .zip(git.contents(opts.side, &path_refs)?)
+        .zip(git.contents(opts.scope.side, &path_refs)?)
         .filter_map(|(p, b)| Some((p, b?)))
         .collect();
     let attr_paths: Vec<String> = contents.iter().map(|(p, _)| p.clone()).collect();
     let filter = Filter::new(
         git.root(),
         git.linguist_attrs(&attr_paths)?,
-        opts.ignore_tests,
+        opts.scope.ignore_tests,
     )?;
     let kept: Vec<(&String, &[u8])> = contents
         .iter()
@@ -389,7 +399,7 @@ pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
 
     Ok(AbsReport {
         version: VersionInfo::for_scorer(&scorer),
-        snapshot: opts.side.label(),
+        snapshot: opts.scope.side.label(),
         file_count: kept.len(),
         raw_bytes: blob.len() as u64,
         compressed_bytes: compressed,

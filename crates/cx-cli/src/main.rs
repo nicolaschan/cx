@@ -5,7 +5,7 @@ use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use cx_cli::git::{Git, Side};
-use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::pipeline::{self, AbsOptions, DiffOptions, Scope};
 use cx_cli::report;
 
 /// Score git trees and diffs by marginal description length: how much
@@ -72,28 +72,32 @@ impl DiffArgs {
     fn options(self, common: &CommonArgs) -> DiffOptions {
         DiffOptions {
             base: self.base,
-            side: common.side(),
-            ignore_tests: common.ignore_tests,
+            scope: common.scope(),
         }
     }
 }
 
 impl CommonArgs {
-    fn side(&self) -> Side {
-        if self.committed {
+    fn scope(&self) -> Scope {
+        let side = if self.committed {
             Side::Head
         } else if self.staged {
             Side::Index
         } else {
             Side::Worktree
+        };
+        Scope {
+            side,
+            ignore_tests: self.ignore_tests,
+            comments: false,
+            prose: false,
         }
     }
 
     fn abs_options(&self) -> AbsOptions {
         AbsOptions {
             no_files: self.no_files,
-            ignore_tests: self.ignore_tests,
-            side: self.side(),
+            scope: self.scope(),
         }
     }
 

@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use cx_cli::git::{Git, Side, Status};
-use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::pipeline::{self, AbsOptions, AbsReport, DiffOptions, DiffReport, Scope};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -61,17 +61,38 @@ fn setup() -> (tempfile::TempDir, Git) {
     (dir, git)
 }
 
-#[test]
-fn scores_a_realistic_branch() {
-    let (_dir, git) = setup();
-    let report = pipeline::diff(
-        &git,
+fn diff_at(git: &Git, side: Side) -> DiffReport {
+    pipeline::diff(
+        git,
         &DiffOptions {
-            side: Side::Head,
+            scope: Scope {
+                side,
+                ..Default::default()
+            },
             ..Default::default()
         },
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn abs_at(git: &Git, side: Side) -> AbsReport {
+    pipeline::abs(
+        git,
+        &AbsOptions {
+            scope: Scope {
+                side,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn scores_a_realistic_branch() {
+    let (_dir, git) = setup();
+    let report = diff_at(&git, Side::Head);
 
     let by_path = |p: &str| {
         report
@@ -147,7 +168,10 @@ fn line_churn_counts_what_git_counts() {
     let without = pipeline::diff(
         &git,
         &DiffOptions {
-            ignore_tests: true,
+            scope: Scope {
+                ignore_tests: true,
+                ..Default::default()
+            },
             ..Default::default()
         },
     )
@@ -167,7 +191,10 @@ fn ignoring_tests_drops_their_cost_and_leaves_the_rest() {
         pipeline::diff(
             &git,
             &DiffOptions {
-                ignore_tests,
+                scope: Scope {
+                    ignore_tests,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )
@@ -253,14 +280,7 @@ fn staged_mode_scores_the_index() {
         .status()
         .unwrap();
 
-    let report = pipeline::diff(
-        &git,
-        &DiffOptions {
-            side: Side::Index,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let report = diff_at(&git, Side::Index);
     let staged = report.files.iter().find(|f| f.path == "src/staged.rs");
     assert!(
         staged.is_some_and(|f| f.review_bytes > 300.0),
@@ -271,14 +291,7 @@ fn staged_mode_scores_the_index() {
 #[test]
 fn tree_reports_absolute_complexity_with_contributions() {
     let (_dir, git) = setup();
-    let report = pipeline::abs(
-        &git,
-        &AbsOptions {
-            side: Side::Head,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let report = abs_at(&git, Side::Head);
     // keep.rs + moved.rs + novel.rs + tests/novel_test.rs;
     // Cargo.lock and logo.png excluded.
     assert_eq!(report.file_count, 4, "kept files at HEAD");
@@ -306,8 +319,10 @@ fn tree_contributions_are_suppressable() {
         &git,
         &AbsOptions {
             no_files: true,
-            side: Side::Head,
-            ..Default::default()
+            scope: Scope {
+                side: Side::Head,
+                ..Default::default()
+            },
         },
     )
     .unwrap();
@@ -330,14 +345,7 @@ fn worktree_side_scores_the_whole_working_tree() {
     fs::write(root.join(".git/info/exclude"), "ignored.rs\n").unwrap();
     fs::write(root.join("ignored.rs"), gen_code(55, 80)).unwrap();
 
-    let report = pipeline::diff(
-        &repo,
-        &DiffOptions {
-            side: Side::Worktree,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let report = diff_at(&repo, Side::Worktree);
     let scored = |p: &str| report.files.iter().find(|f| f.path == p);
 
     for path in ["src/staged.rs", "src/keep.rs", "src/untracked.rs"] {
@@ -355,14 +363,7 @@ fn worktree_side_scores_the_whole_working_tree() {
     );
 
     // The unstaged and untracked halves are exactly what --staged misses.
-    let staged_only = pipeline::diff(
-        &repo,
-        &DiffOptions {
-            side: Side::Index,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let staged_only = diff_at(&repo, Side::Index);
     let staged_paths: Vec<&str> = staged_only.files.iter().map(|f| f.path.as_str()).collect();
     assert!(staged_paths.contains(&"src/staged.rs"));
     assert!(!staged_paths.contains(&"src/keep.rs"));
@@ -382,14 +383,7 @@ fn abs_measures_the_snapshot_it_is_asked_for() {
     fs::write(root.join("ignored.rs"), gen_code(55, 80)).unwrap();
 
     let measure = |side| {
-        let report = pipeline::abs(
-            &repo,
-            &AbsOptions {
-                side,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let report = abs_at(&repo, side);
         let mut paths: Vec<String> = report.files.iter().map(|f| f.path.clone()).collect();
         paths.sort();
         assert_eq!(report.file_count, paths.len(), "{side:?}");
@@ -464,14 +458,7 @@ fn an_unmerged_path_is_scored_once() {
     assert!(!merge.status.success(), "the merge must conflict");
 
     let repo = Git::discover_at(root).unwrap();
-    let report = pipeline::abs(
-        &repo,
-        &AbsOptions {
-            side: Side::Worktree,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let report = abs_at(&repo, Side::Worktree);
     assert_eq!(
         report.file_count, 1,
         "src/f.rs is one file, not one per stage"
@@ -484,24 +471,10 @@ fn an_unmerged_path_is_scored_once() {
 fn untracked_lines_reach_the_churn_totals() {
     let (dir, repo) = setup();
     let root = dir.path();
-    let committed = pipeline::diff(
-        &repo,
-        &DiffOptions {
-            side: Side::Head,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let committed = diff_at(&repo, Side::Head);
 
     fs::write(root.join("src/fresh.rs"), gen_code(77, 40)).unwrap();
-    let worktree = pipeline::diff(
-        &repo,
-        &DiffOptions {
-            side: Side::Worktree,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let worktree = diff_at(&repo, Side::Worktree);
 
     assert_eq!(
         worktree.totals.added_lines,
