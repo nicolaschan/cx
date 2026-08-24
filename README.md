@@ -47,13 +47,17 @@ $ cx --verbose
 ```
 
 ```
-cx       [-n <N>] [--base <ref>] [--staged]   # overview: one merged table — tree
-                                              #   breakdown plus the diff's ΔC per path
-cx diff  [-n <N>] [--base <ref>] [--staged]   # just the diff, sized by review cost
-cx abs   [-n <N>]                             # absolute C(tree): the trend-line number
+cx       [-n <N>] [--base <ref>]  # overview: one merged table — tree breakdown plus the diff's ΔC per path
+cx diff  [-n <N>] [--base <ref>]  # just the diff, sized by review cost
+cx abs   [-n <N>]                 # absolute C(tree): the trend-line number
 
-# any of the above: [-v|--verbose] [--no-files] [--ignore-tests] [--json]
+# any of the above: [--staged|--committed] [-v|--verbose] [--no-files] [--ignore-tests] [--json]
 ```
+
+Every view scores the **working tree** by default — staged and unstaged
+changes, plus untracked files that aren't ignored. `--staged` scores the
+index; `--committed` scores HEAD. `abs` takes the same choice — `C(tree)`
+and `ΔC` describe the same snapshot.
 
 Defaults can be pinned through the environment — `CX_IGNORE_TESTS=1`,
 `CX_TOP=15`, `CX_BASE=develop` — and any single run can still override
