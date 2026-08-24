@@ -146,31 +146,52 @@ fn attributed_scores_are_per_item_conditionals() {
     );
 }
 
-/// No lookahead: an item's score depends on what came before it, never on
-/// what comes after. Later items are swapped for others of the same
-/// length so the stream's window stays the same.
+/// No lookahead: an item's score is a function of the bytes before it.
+/// Appending anything after it — here enough to grow the window and span
+/// several zstd blocks — leaves it untouched.
 #[test]
 fn later_items_do_not_change_earlier_scores() {
     let s = scorer();
     let reference = gen_code(400, 100);
-    let (x, y, z) = (gen_code(501, 50), gen_code(502, 50), gen_code(503, 50));
-    let z_prime: Vec<u8> = z
-        .iter()
-        .map(|&b| {
-            if b.is_ascii_digit() {
-                b'0' + (b - b'0' + 5) % 10
-            } else {
-                b
-            }
+    let (x, y, big) = (gen_code(501, 50), gen_code(502, 50), gen_code(503, 3000));
+    let before = s.attribution(&[&reference], &[&x, &y]).run(&|_| {});
+    let after = s.attribution(&[&reference], &[&x, &y, &big]).run(&|_| {});
+    assert_eq!(before[..], after[..2]);
+}
+
+/// An empty part costs nothing and changes nothing around it.
+#[test]
+fn empty_items_are_free() {
+    let s = scorer();
+    let reference = gen_code(800, 100);
+    let (a, b) = (gen_code(801, 40), gen_code(802, 40));
+    let plain = s.attribution(&[&reference], &[&a, &b]).run(&|_| {});
+    let padded: [&[u8]; 5] = [&[], &a, &[], &b, &[]];
+    assert_eq!(
+        s.attribution(&[&reference], &padded).run(&|_| {}),
+        [0, plain[0], 0, plain[1], 0]
+    );
+}
+
+/// Bytes zstd cannot compress come out whole, block headers included,
+/// however many blocks they span: the output grows to fit.
+#[test]
+fn incompressible_parts_score_their_size() {
+    let s = scorer();
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let noise: Vec<u8> = (0..300_000)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 56) as u8
         })
         .collect();
-    assert_ne!(z, z_prime);
-
-    let before = s.attribution(&[&reference], &[&x, &y, &z]).run(&|_| {});
-    let after = s
-        .attribution(&[&reference], &[&x, &y, &z_prime])
-        .run(&|_| {});
-    assert_eq!(before[..2], after[..2]);
+    let score = s.score(&[], &noise);
+    assert!(
+        score > noise.len() as u64 && score < noise.len() as u64 + 64,
+        "{score}"
+    );
 }
 
 /// What a progress bar is sized to is what the run reports.
@@ -187,5 +208,5 @@ fn progress_advances_by_exactly_the_planned_cost() {
     attribution.run(&|bytes| {
         advanced.fetch_add(bytes, Ordering::Relaxed);
     });
-    assert_eq!(advanced.into_inner(), attribution.cost());
+    assert_eq!(advanced.into_inner(), attribution.bytes());
 }

@@ -1,8 +1,9 @@
 //! Pure scoring engine: marginal description length of byte strings,
 //! estimated by zstd compression conditioned on a reference.
 //!
-//! No git, no filesystem, no I/O — callers supply bytes. This is the
-//! WASM-safe boundary; everything here is a pure function of its inputs.
+//! No git, no filesystem, no I/O, no threads — callers supply bytes.
+//! This is the WASM-safe boundary; everything here is a pure function of
+//! its inputs.
 //!
 //! Scores are comparable only within one compressor version + parameter
 //! set. Callers should surface [`zstd_version`] next to any scores.
@@ -10,7 +11,7 @@
 pub mod testgen;
 
 use zstd_safe::zstd_sys::ZSTD_EndDirective::ZSTD_e_flush;
-use zstd_safe::{CCtx, CParameter, InBuffer, OutBuffer, compress_bound};
+use zstd_safe::{CCtx, CParameter, InBuffer, OutBuffer};
 
 /// The zstd library version this build scores with, e.g. "1.5.6".
 pub fn zstd_version() -> String {
@@ -72,8 +73,8 @@ impl Scorer {
 
     /// Smallest window covering the whole stream, clamped to zstd's floor
     /// of 10 and this scorer's platform ceiling.
-    fn window_log(&self, total_len: u64) -> u32 {
-        let needed = u64::BITS - total_len.saturating_sub(1).leading_zeros();
+    fn window_log(&self, stream_len: u64) -> u32 {
+        let needed = u64::BITS - stream_len.saturating_sub(1).leading_zeros();
         needed.clamp(10, self.max_window_log)
     }
 }
@@ -82,7 +83,8 @@ impl Scorer {
 /// every part boundary. An item's score is the bytes its part added to
 /// the output — C(item_i | reference ++ items[..i]), the chain rule, so a
 /// pattern repeated across items is charged to its first occurrence and
-/// near-free afterwards. Nothing after a part can change its score.
+/// near-free afterwards. A part's score is a function of the bytes before
+/// it and nothing after.
 pub struct Attribution<'a> {
     scorer: &'a Scorer,
     reference: &'a [&'a [u8]],
@@ -94,8 +96,9 @@ impl Attribution<'_> {
         self.reference.iter().chain(self.items).copied()
     }
 
-    /// Bytes to compress: the unit progress advances in.
-    pub fn cost(&self) -> u64 {
+    /// The stream's length: bytes to compress, the unit progress advances
+    /// in.
+    pub fn bytes(&self) -> u64 {
         self.parts().map(|part| part.len() as u64).sum()
     }
 
@@ -113,44 +116,35 @@ impl Attribution<'_> {
         set(&mut cctx, CParameter::EnableLongDistanceMatching(true));
         set(
             &mut cctx,
-            CParameter::WindowLog(self.scorer.window_log(self.cost())),
+            CParameter::WindowLog(self.scorer.window_log(self.bytes())),
         );
 
-        let bound: usize = self.parts().map(|part| compress_bound(part.len())).sum();
-        let mut out = Vec::with_capacity(bound + compress_bound(0));
-        let mut sink = OutBuffer::around(&mut out);
+        let mut out: Vec<u8> = Vec::new();
         let mut feed = |part: &[u8]| -> u64 {
-            let before = sink.pos();
+            let before = out.len();
             let mut source = InBuffer::around(part);
             loop {
+                // Room for at least one more block, so every call makes
+                // progress; zstd reports 0 once the part is consumed and
+                // flushed.
+                out.reserve(CCtx::out_size());
+                let pos = out.len();
+                let mut sink = OutBuffer::around_pos(&mut out, pos);
                 let pending = cctx
                     .compress_stream2(&mut sink, &mut source, ZSTD_e_flush)
                     .unwrap_or_else(|c| panic!("zstd: {}", zstd_safe::get_error_name(c)));
-                if pending == 0 && source.pos() == part.len() {
+                if pending == 0 {
                     break;
                 }
             }
             progress(part.len() as u64);
-            (sink.pos() - before) as u64
+            (out.len() - before) as u64
         };
         for part in self.reference {
             feed(part);
         }
         self.items.iter().map(|item| feed(item)).collect()
     }
-}
-
-/// Run several attributions at once, one thread each. Results land in
-/// the same order as `attributions`.
-pub fn run_all<const N: usize>(
-    attributions: [&Attribution<'_>; N],
-    progress: &(dyn Fn(u64) + Sync),
-) -> [Vec<u64>; N] {
-    std::thread::scope(|scope| {
-        attributions
-            .map(|attribution| scope.spawn(move || attribution.run(progress)))
-            .map(|stream| stream.join().expect("stream thread"))
-    })
 }
 
 #[cfg(test)]

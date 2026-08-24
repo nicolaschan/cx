@@ -5,7 +5,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
-use cx_core::{Scorer, run_all};
+use cx_core::Scorer;
 use serde::Serialize;
 
 use crate::filter::Filter;
@@ -253,8 +253,13 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         scorer.attribution(&remainder, &new_items),
         scorer.attribution(&remainder, &old_items),
     ];
-    let phase = progress.phase("diff", passes.iter().map(|pass| pass.cost()).sum());
-    let [review, delta_new, delta_old] = run_all(passes.each_ref(), &phase);
+    let phase = &progress.phase("diff", passes.iter().map(|pass| pass.bytes()).sum());
+    let [review, delta_new, delta_old] = std::thread::scope(|scope| {
+        passes
+            .each_ref()
+            .map(|pass| scope.spawn(move || pass.run(phase)))
+            .map(|stream| stream.join().expect("stream thread"))
+    });
 
     let mut files = Vec::with_capacity(items.len());
     let (mut new_i, mut old_i) = (0, 0);
@@ -294,19 +299,19 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         .filter_map(|item| churn.get(&item.path))
         .fold((0, 0), |(a, d), (added, deleted)| (a + added, d + deleted));
 
+    let totals = Totals {
+        review_bytes: files.iter().map(|f| f.review_bytes).sum(),
+        delta_bytes: files.iter().map(|f| f.delta_bytes).sum(),
+        added_lines,
+        deleted_lines,
+    };
     Ok(DiffReport {
         version: VersionInfo::for_scorer(&scorer),
         base,
         merge_base,
         files,
         skipped,
-        totals: Totals {
-            review_bytes: review.iter().sum(),
-            delta_bytes: delta_new.iter().sum::<u64>() as i64
-                - delta_old.iter().sum::<u64>() as i64,
-            added_lines,
-            deleted_lines,
-        },
+        totals,
     })
 }
 
@@ -334,7 +339,7 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
 
     let scorer = Scorer::default();
     let tree = scorer.attribution(&[], &kept_contents);
-    let scores = tree.run(&progress.phase("C(tree)", tree.cost()));
+    let scores = tree.run(&progress.phase("C(tree)", tree.bytes()));
     let mut files: Vec<AbsFile> = kept
         .iter()
         .zip(&scores)
