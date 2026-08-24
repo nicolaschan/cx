@@ -27,22 +27,31 @@ $ cx diff
      ≈0  −5.0 KB  −      -  │   └── poller.rs        ░░░░░░░░░░   0.1%
  1.9 KB   +248 B        92  └── README.md            █░░░░░░░░░   9.5%
 
- PR total: review 4.4 KB, ΔC +3.9 KB
- attribution scale: 0.94 (ok)   zstd 1.5.7, level 19, window≤2^31
- skipped: Cargo.lock (generated/vendored pattern)
+ review 4.4 KB   ΔC +3.9 KB   1 skipped
 ```
 
 The `+`/`−`/`→` column marks added, deleted, and renamed files (`⚠` for
 density outliers).
 
+The footer line carries what the run is for — C(tree) where the view has
+it, review, ΔC — colored on the same magnitude scale as the cells above.
+`--verbose` adds the rest:
+
+```console
+$ cx --verbose
+ C(tree) 23.4 KB   review 4.4 KB   ΔC +3.9 KB   1 skipped
+ C(tree) over 23 files (83.7 KB raw)
+ skipped: Cargo.lock (generated/vendored pattern)
+ attribution scale: 0.94 (ok)   zstd 1.5.7, level 19, window≤2^31
+```
+
 ```
 cx       [-n <N>] [--base <ref>] [--staged]   # overview: one merged table — tree
                                               #   breakdown plus the diff's ΔC per path
 cx diff  [-n <N>] [--base <ref>] [--staged]   # just the diff, sized by review cost
-cx abs   [-n <N>] [--no-files] [--json]       # absolute C(tree): the trend-line number
+cx abs   [-n <N>]                             # absolute C(tree): the trend-line number
 
-# any of the above, with tests left out entirely:
-cx diff --ignore-tests
+# every view: [-v|--verbose] [--no-files] [--ignore-tests] [--json]
 ```
 
 Defaults can be pinned through the environment — `CX_IGNORE_TESTS=1`,
@@ -54,17 +63,17 @@ The tree breakdown is dust-style: contributions aggregate up the
 directory tree, only the `-n` globally biggest files/directories are
 shown (default 30), and everything pruned collapses into a per-directory
 `… +N more` row — so the view stays one screen even on repos with
-thousands of files. `--no-files` (also on the bare `cx`) suppresses the
-breakdown and skips computing it entirely. Tables colorize on a terminal
-and degrade to plain text when piped.
+thousands of files. `--no-files` suppresses the breakdown, leaving the
+footer alone (on `cx` and `cx abs` it also skips computing it entirely).
+Output colorizes on a terminal and degrades to plain text when piped.
 
 `--json` emits the full report (per-file scores, skipped files, totals,
 scale factors, compressor version) — the stable contract for tooling.
 
 Per-file attribution is sequential (chain rule): a pattern repeated across
 files in one PR is charged once, at its first occurrence. Sums are robust;
-the `attribution scale` line is the built-in noise gauge (≈ 1.0 → trust
-per-file numbers, far off → trust totals).
+`--verbose`'s `attribution scale` line is the built-in noise gauge (≈ 1.0
+→ trust per-file numbers, far off → trust totals).
 
 Files are filtered before scoring: `.gitattributes` linguist annotations,
 binary detection, common generated/vendored patterns (lockfiles, `dist/`,

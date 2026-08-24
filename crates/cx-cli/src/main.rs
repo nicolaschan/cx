@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use anyhow::{Result, bail};
 use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -15,9 +17,6 @@ use cx_cli::report;
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
-    /// Hide the per-file breakdown; show summary lines only.
-    #[arg(long)]
-    no_files: bool,
     #[command(flatten)]
     diff: DiffArgs,
     #[command(flatten)]
@@ -40,9 +39,16 @@ struct CommonArgs {
         value_parser = BoolishValueParser::new(),
     )]
     ignore_tests: bool,
+    /// Hide the per-file breakdown; show the summary line only.
+    #[arg(long)]
+    no_files: bool,
     /// Show only the N biggest files/directories in the breakdown.
     #[arg(short = 'n', long, env = "CX_TOP", default_value_t = 30)]
     top: usize,
+    /// Also show attribution scale, compressor provenance, and the
+    /// skipped files by name.
+    #[arg(short = 'v', long)]
+    verbose: bool,
     #[arg(long)]
     json: bool,
 }
@@ -69,10 +75,21 @@ impl DiffArgs {
 }
 
 impl CommonArgs {
-    fn abs_options(&self, no_files: bool) -> AbsOptions {
+    fn abs_options(&self) -> AbsOptions {
         AbsOptions {
-            no_files,
+            no_files: self.no_files,
             ignore_tests: self.ignore_tests,
+        }
+    }
+
+    /// The one place that asks where the output is going: the renderer
+    /// takes the answer as an input rather than sniffing it itself.
+    fn report_options(&self) -> report::Options {
+        report::Options {
+            top: self.top,
+            files: !self.no_files,
+            verbose: self.verbose,
+            color: std::io::stdout().is_terminal(),
         }
     }
 }
@@ -90,9 +107,6 @@ enum Cmd {
     },
     /// Absolute C(tree) of HEAD — the trend-line number.
     Abs {
-        /// Hide per-file contributions.
-        #[arg(long)]
-        no_files: bool,
         #[command(flatten)]
         common: CommonArgs,
     },
@@ -120,21 +134,12 @@ fn main() -> Result<()> {
     match cli.cmd {
         None => {
             let common = cli.common;
-            let abs = pipeline::abs(&git, &common.abs_options(cli.no_files))?;
+            let abs = pipeline::abs(&git, &common.abs_options())?;
             let diff = pipeline::diff(&git, &cli.diff.options(&common))?;
-            let rendered = if cli.no_files {
-                format!(
-                    "{}\n{}",
-                    report::render_abs(&abs, common.top),
-                    report::render_diff(&diff, common.top)
-                )
-            } else {
-                report::render_overview(&abs, &diff, common.top)
-            };
             emit(
                 common.json,
                 &serde_json::json!({ "abs": abs, "diff": diff }),
-                rendered,
+                report::render_overview(&abs, &diff, common.report_options()),
             )?;
         }
         Some(Cmd::Diff {
@@ -149,15 +154,15 @@ fn main() -> Result<()> {
             emit(
                 common.json,
                 &report,
-                report::render_diff(&report, common.top),
+                report::render_diff(&report, common.report_options()),
             )?;
         }
-        Some(Cmd::Abs { no_files, common }) => {
-            let report = pipeline::abs(&git, &common.abs_options(no_files))?;
+        Some(Cmd::Abs { common }) => {
+            let report = pipeline::abs(&git, &common.abs_options())?;
             emit(
                 common.json,
                 &report,
-                report::render_abs(&report, common.top),
+                report::render_abs(&report, common.report_options()),
             )?;
         }
     }

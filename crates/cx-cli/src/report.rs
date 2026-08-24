@@ -1,17 +1,52 @@
-//! Human-readable rendering via comfy-table: layout, color, and the
-//! piped-output fallback (styling only applies on a tty) all come from
-//! the library. The JSON form is serde on the report structs — that
-//! serialization is the contract tooling consumes.
-
-use std::io::IsTerminal;
-use std::sync::OnceLock;
+//! Human-readable rendering via comfy-table: the layout and the tables'
+//! styling come from the library. The JSON form is serde on the report
+//! structs — that serialization is the contract tooling consumes.
 
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, presets};
 use crossterm::style::{ResetColor, SetForegroundColor};
 
 use crate::breakdown::{self, Entry, Node};
 use crate::git::Status;
-use crate::pipeline::{AbsReport, DiffFile, DiffReport};
+use crate::pipeline::{AbsReport, DiffFile, DiffReport, VersionInfo};
+
+/// What a view includes, and whether it may say it in color. Rendering
+/// reads nothing else about its surroundings, so the same report renders
+/// the same bytes wherever it runs.
+#[derive(Clone, Copy)]
+pub struct Options {
+    /// Show only the N biggest files/directories in the breakdown.
+    pub top: usize,
+    /// Emit the per-file breakdown at all.
+    pub files: bool,
+    /// Emit the footer's detail lines.
+    pub verbose: bool,
+    /// The caller's answer to "is the output a terminal?", applied to
+    /// tables and footer alike so a run colors everything or nothing.
+    pub color: bool,
+}
+
+impl Options {
+    /// Colors are the `comfy_table::Color` the table cells use (the
+    /// crate re-exports crossterm's type), so a value means the same
+    /// thing above and below the table.
+    fn paint(self, text: impl std::fmt::Display, color: Option<Color>) -> String {
+        match color.filter(|_| self.color) {
+            Some(c) => format!("{}{text}{}", SetForegroundColor(c), ResetColor),
+            None => text.to_string(),
+        }
+    }
+
+    /// Incidental metadata: present, never competing with the numbers.
+    fn dim(self, text: impl std::fmt::Display) -> String {
+        self.paint(text, Some(Color::DarkGrey))
+    }
+
+    /// A `label value` pair: the label recedes so the eye lands on the
+    /// number, which carries the magnitude color.
+    fn stat(self, label: &str, value: String, color: Option<Color>) -> String {
+        format!("{} {}", self.dim(label), self.paint(value, color))
+    }
+}
 
 /// An [`Entry`] for one path, with the diff columns (ΔC + marker) filled
 /// from its change when it has one. The single construction point for
@@ -74,31 +109,6 @@ fn colored(cell: Cell, color: Option<Color>) -> Cell {
         Some(c) => cell.fg(c),
         None => cell,
     }
-}
-
-/// Whether to emit escape sequences, decided exactly as comfy-table
-/// decides it for the tables — so a run either colors everything or
-/// nothing, and piped output stays plain.
-fn styling_enabled() -> bool {
-    static TTY: OnceLock<bool> = OnceLock::new();
-    *TTY.get_or_init(|| std::io::stdout().is_terminal())
-}
-
-/// Color a footer line's fragment. Colors come from the same
-/// `comfy_table::Color` vocabulary the table cells use (the crate
-/// re-exports crossterm's type), so a value means the same thing above
-/// and below the table.
-fn paint(text: impl std::fmt::Display, color: Option<Color>) -> String {
-    match color.filter(|_| styling_enabled()) {
-        Some(c) => format!("{}{text}{}", SetForegroundColor(c), ResetColor),
-        None => text.to_string(),
-    }
-}
-
-/// Provenance and other incidental metadata: present, never competing
-/// with the numbers.
-fn dim(text: impl std::fmt::Display) -> String {
-    paint(text, Some(Color::DarkGrey))
 }
 
 fn num_cell(text: String, color: Option<Color>) -> Cell {
@@ -195,138 +205,181 @@ fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, show_
     }
 }
 
-/// Render entries as the dust-style table. `diff_columns` names the size
-/// column ("BYTES" for tree contributions, "REVIEW" for diff cost) and
-/// adds the ΔC + status columns; `None` renders the plain tree view.
+/// Render entries as the dust-style table, or `None` when there is no
+/// breakdown to show. `diff_columns` names the size column ("BYTES" for
+/// tree contributions, "REVIEW" for diff cost) and adds the ΔC + status
+/// columns; `None` renders the plain tree view.
 fn breakdown_table<'a>(
     entries: impl IntoIterator<Item = Entry<'a>>,
     total: f64,
-    top: usize,
+    opts: Options,
     diff_columns: Option<&'static str>,
-) -> String {
-    let root = breakdown::breakdown(entries, top);
+) -> Option<String> {
+    if !opts.files {
+        return None;
+    }
+    let root = breakdown::breakdown(entries, opts.top);
+    if root.children.is_empty() {
+        return None;
+    }
     let columns: &[&str] = match diff_columns {
         Some(bytes_header) => &[bytes_header, "ΔC", "", "LINES", "PATH", "SHARE"],
         None => &["BYTES", "LINES", "PATH", "SHARE"],
     };
     let mut table = Table::new();
+    if opts.color {
+        table.enforce_styling();
+    } else {
+        table.force_no_tty();
+    }
     table.load_preset(presets::NOTHING);
     table.set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(columns.iter().map(|c| Cell::new(c).fg(Color::DarkGrey)));
     push_children(&mut table, &root, "", total, diff_columns.is_some());
-    table.to_string()
+    Some(table.to_string())
 }
 
-/// The footer both diff-aware views share: PR total (or "no changes"),
-/// the attribution-scale verdict, and the skipped list.
-fn diff_footer(diff: &DiffReport, extra_scale: f64) -> String {
-    let mut out = String::new();
-    if diff.files.is_empty() && diff.skipped.is_empty() {
-        out.push_str(&dim(format!(" no scorable changes against {}", diff.base)));
-        out.push('\n');
-    } else {
+/// A view is its breakdown, where there is one, above its footer.
+fn page(table: Option<String>, footer: String) -> String {
+    match table {
+        Some(table) => format!("{table}\n\n{footer}"),
+        None => footer,
+    }
+}
+
+/// Everything under the table: one summary line, always shown, and the
+/// details `--verbose` adds. A view folds in whichever reports it holds,
+/// so what two views share is written and emitted once.
+struct Footer<'a> {
+    opts: Options,
+    version: &'a VersionInfo,
+    summary: Vec<String>,
+    details: Vec<String>,
+    /// Noisiest attribution pass folded in so far — one bad pass makes
+    /// every per-item number in the view suspect.
+    scale: f64,
+}
+
+impl<'a> Footer<'a> {
+    fn new(opts: Options, version: &'a VersionInfo) -> Self {
+        Footer {
+            opts,
+            version,
+            summary: Vec::new(),
+            details: Vec::new(),
+            scale: 1.0,
+        }
+    }
+
+    fn abs(mut self, abs: &AbsReport) -> Self {
+        let opts = self.opts;
+        // C(tree) is a whole-repo absolute, not a change: no magnitude
+        // color, which would sit permanently red.
+        self.summary
+            .push(opts.stat("C(tree)", fmt_bytes(abs.compressed_bytes as f64), None));
+        self.details.push(opts.dim(format!(
+            "C(tree) over {} files ({} raw)",
+            abs.file_count,
+            fmt_bytes(abs.raw_bytes as f64),
+        )));
+        self.scale = noisier(self.scale, abs.scale);
+        self
+    }
+
+    fn diff(mut self, diff: &DiffReport) -> Self {
+        let opts = self.opts;
         // The totals carry the same magnitude coloring as the cells they
         // sum, so a red total and a red row mean one thing.
         let review = diff.totals.review_bytes as f64;
         let delta = diff.totals.delta_bytes as f64;
-        out.push_str(&format!(
-            " PR total: review {}, ΔC {}\n",
-            paint(fmt_bytes(review), score_color(review)),
-            paint(fmt_signed(delta), score_color(delta)),
-        ));
-    }
-    let worst = [
-        diff.scales.review,
-        diff.scales.delta_new,
-        diff.scales.delta_old,
-        extra_scale,
-    ]
-    .into_iter()
-    .fold(1.0f64, |acc, s| {
-        if (s - 1.0).abs() > (acc - 1.0).abs() {
-            s
+        if diff.files.is_empty() && diff.skipped.is_empty() {
+            self.summary
+                .push(opts.dim(format!("no scorable changes against {}", diff.base)));
         } else {
-            acc
+            self.summary
+                .push(opts.stat("review", fmt_bytes(review), score_color(review)));
+            self.summary
+                .push(opts.stat("ΔC", fmt_signed(delta), score_color(delta)));
         }
-    });
-    out.push_str(&format!(
-        " {} {}   {}\n",
-        dim("attribution scale:"),
-        scale_gauge(worst),
-        provenance_line(&diff.version),
-    ));
-    if !diff.skipped.is_empty() {
-        let list: Vec<String> = diff
-            .skipped
-            .iter()
-            .map(|s| format!("{} ({})", s.path, s.reason))
-            .collect();
-        out.push_str(&dim(format!(" skipped: {}", list.join(", "))));
-        out.push('\n');
+        if !diff.skipped.is_empty() {
+            // The count stays on the summary line: it says the totals
+            // beside it do not cover everything that changed.
+            self.summary
+                .push(opts.dim(format!("{} skipped", diff.skipped.len())));
+            let list: Vec<String> = diff
+                .skipped
+                .iter()
+                .map(|s| format!("{} ({})", s.path, s.reason))
+                .collect();
+            self.details
+                .push(opts.dim(format!("skipped: {}", list.join(", "))));
+        }
+        self.scale = [
+            diff.scales.review,
+            diff.scales.delta_new,
+            diff.scales.delta_old,
+        ]
+        .into_iter()
+        .fold(self.scale, noisier);
+        self
     }
-    out
+
+    fn render(mut self) -> String {
+        let (opts, v) = (self.opts, self.version);
+        let mut lines = vec![self.summary.join("   ")];
+        if opts.verbose {
+            let (verdict, color) = if (0.7..=1.1).contains(&self.scale) {
+                ("ok", Color::Green)
+            } else {
+                (
+                    "noisy — trust totals, not per-file attribution",
+                    Color::Yellow,
+                )
+            };
+            self.details.push(format!(
+                "{} {}   {}",
+                opts.dim("attribution scale:"),
+                opts.paint(format!("{:.2} ({verdict})", self.scale), Some(color)),
+                // Provenance: the scores mean nothing without it, but it
+                // never changes run to run — dim.
+                opts.dim(format!(
+                    "zstd {}, level {}, window≤2^{}",
+                    v.zstd, v.level, v.max_window_log
+                )),
+            ));
+            lines.append(&mut self.details);
+        }
+        lines.iter().map(|line| format!(" {line}\n")).collect()
+    }
 }
 
-/// The attribution noise gauge, colored by whether per-item numbers can
-/// be trusted at all. One definition of "trustworthy" for every view.
-fn scale_gauge(scale: f64) -> String {
-    let trustworthy = (0.7..=1.1).contains(&scale);
-    let (verdict, color) = if trustworthy {
-        ("ok", Color::Green)
+/// Of two attribution scales, the one further from 1.0.
+fn noisier(a: f64, b: f64) -> f64 {
+    if (b - 1.0).abs() > (a - 1.0).abs() {
+        b
     } else {
-        (
-            "noisy — trust totals, not per-file attribution",
-            Color::Yellow,
-        )
-    };
-    paint(format!("{scale:.2} ({verdict})"), Some(color))
-}
-
-/// Compressor provenance: the scores mean nothing without it, but it
-/// never changes run to run — dim.
-fn provenance_line(version: &crate::pipeline::VersionInfo) -> String {
-    dim(format!(
-        "zstd {}, level {}, window≤2^{}",
-        version.zstd, version.level, version.max_window_log
-    ))
-}
-
-/// C(tree) is a whole-repo absolute, not a change: no magnitude color
-/// (it would sit permanently red), just the count and raw size dimmed.
-fn ctree_line(abs: &AbsReport) -> String {
-    format!(
-        " C(tree) = {} {}",
-        fmt_bytes(abs.compressed_bytes as f64),
-        dim(format!(
-            "over {} files ({} raw)",
-            abs.file_count,
-            fmt_bytes(abs.raw_bytes as f64),
-        )),
-    )
+        a
+    }
 }
 
 /// The diff view: same dust-style renderer as the overview, but only the
 /// diff's files — sized by REVIEW cost, with ΔC and status markers.
-pub fn render_diff(report: &DiffReport, top: usize) -> String {
-    if report.files.is_empty() && report.skipped.is_empty() {
-        return format!(
-            "{}\n",
-            dim(format!("no scorable changes against {}", report.base))
-        );
-    }
+pub fn render_diff(report: &DiffReport, opts: Options) -> String {
     let total = report.totals.review_bytes.max(1) as f64;
     let entries = report
         .files
         .iter()
         .map(|f| entry(&f.path, f.review_bytes, f.new_lines, Some(f)));
-    let table = breakdown_table(entries, total, top, Some("REVIEW"));
-    format!("{table}\n\n{}", diff_footer(report, 1.0))
+    page(
+        breakdown_table(entries, total, opts, Some("REVIEW")),
+        Footer::new(opts, &report.version).diff(report).render(),
+    )
 }
 
 /// The default view: one table merging the tree breakdown with the
 /// diff's ΔC per touched path. Deleted files have no tree bytes but
 /// their refunds still aggregate into their directory's ΔC.
-pub fn render_overview(abs: &AbsReport, diff: &DiffReport, top: usize) -> String {
+pub fn render_overview(abs: &AbsReport, diff: &DiffReport, opts: Options) -> String {
     let mut changed: std::collections::HashMap<&str, &DiffFile> =
         diff.files.iter().map(|f| (f.path.as_str(), f)).collect();
     let mut entries: Vec<Entry> = abs
@@ -341,34 +394,21 @@ pub fn render_overview(abs: &AbsReport, diff: &DiffReport, top: usize) -> String
     );
 
     let total = abs.compressed_bytes.max(1) as f64;
-    let table = breakdown_table(entries, total, top, Some("BYTES"));
-    format!(
-        "{table}\n\n{}\n{}",
-        ctree_line(abs),
-        diff_footer(diff, abs.scale)
+    page(
+        breakdown_table(entries, total, opts, Some("BYTES")),
+        Footer::new(opts, &abs.version).abs(abs).diff(diff).render(),
     )
 }
 
-pub fn render_abs(report: &AbsReport, top: usize) -> String {
-    if report.files.is_empty() {
-        return format!(
-            "{}   {}\n",
-            ctree_line(report),
-            provenance_line(&report.version)
-        );
-    }
+pub fn render_abs(report: &AbsReport, opts: Options) -> String {
     let total = report.compressed_bytes.max(1) as f64;
     let entries = report
         .files
         .iter()
         .map(|f| entry(&f.path, f.bytes, f.lines, None));
-    let table = breakdown_table(entries, total, top, None);
-    format!(
-        "{table}\n\n{}\n {} {}   {}\n",
-        ctree_line(report),
-        dim("attribution scale:"),
-        scale_gauge(report.scale),
-        provenance_line(&report.version),
+    page(
+        breakdown_table(entries, total, opts, None),
+        Footer::new(opts, &report.version).abs(report).render(),
     )
 }
 
@@ -397,38 +437,201 @@ fn fmt_signed(bytes: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::{AbsFile, Scales, Skipped, Totals};
+
+    fn version() -> VersionInfo {
+        VersionInfo {
+            cx: "0",
+            zstd: "1.5.7".into(),
+            level: 19,
+            max_window_log: 31,
+        }
+    }
+
+    fn abs_report() -> AbsReport {
+        AbsReport {
+            version: version(),
+            rev: "HEAD".into(),
+            file_count: 2,
+            raw_bytes: 40960,
+            compressed_bytes: 10240,
+            files: vec![
+                AbsFile {
+                    path: "src/a.rs".into(),
+                    bytes: 8192.0,
+                    lines: 200,
+                },
+                AbsFile {
+                    path: "src/b.rs".into(),
+                    bytes: 2048.0,
+                    lines: 50,
+                },
+            ],
+            scale: 0.95,
+        }
+    }
+
+    fn diff_file(status: Status, density_outlier: bool) -> DiffFile {
+        DiffFile {
+            path: "src/a.rs".into(),
+            status,
+            review_bytes: 2048.0,
+            review_raw: 4096,
+            delta_bytes: 1024.0,
+            new_lines: 40,
+            bytes_per_line: None,
+            density_outlier,
+        }
+    }
+
+    fn diff_report() -> DiffReport {
+        DiffReport {
+            version: version(),
+            base: "master".into(),
+            merge_base: "abc123".into(),
+            files: vec![diff_file(Status::Modified, false)],
+            skipped: vec![Skipped {
+                path: "Cargo.lock".into(),
+                reason: "generated/vendored pattern".into(),
+            }],
+            totals: Totals {
+                review_bytes: 2048,
+                delta_bytes: 1024,
+            },
+            scales: Scales {
+                review: 1.0,
+                delta_new: 1.0,
+                delta_old: 1.0,
+            },
+        }
+    }
+
+    const OPTS: Options = Options {
+        top: 30,
+        files: true,
+        verbose: false,
+        color: false,
+    };
+    const SUMMARY: &str = " C(tree) 10.0 KB   review 2.0 KB   ΔC +1.0 KB   1 skipped\n";
+
+    /// Everything the overview prints below its table.
+    fn footer(abs: &AbsReport, diff: &DiffReport, opts: Options) -> String {
+        let rendered = render_overview(abs, diff, opts);
+        rendered.rsplit("\n\n").next().unwrap().to_owned()
+    }
+
+    /// The numbers the run exists to give need no flag; nothing else
+    /// comes without one.
+    #[test]
+    fn summary_line_is_the_whole_default_footer() {
+        assert_eq!(footer(&abs_report(), &diff_report(), OPTS), SUMMARY);
+    }
+
+    #[test]
+    fn verbose_adds_the_details_below_the_summary() {
+        let opts = Options {
+            verbose: true,
+            ..OPTS
+        };
+        assert_eq!(
+            footer(&abs_report(), &diff_report(), opts),
+            format!(
+                "{SUMMARY}\
+                 \x20C(tree) over 2 files (40.0 KB raw)\n\
+                 \x20skipped: Cargo.lock (generated/vendored pattern)\n\
+                 \x20attribution scale: 0.95 (ok)   zstd 1.5.7, level 19, window≤2^31\n"
+            )
+        );
+    }
+
+    /// The gauge covers every pass the view merged, not just the diff's.
+    #[test]
+    fn attribution_gauge_reports_the_noisiest_scale() {
+        let mut abs = abs_report();
+        abs.scale = 0.4;
+        let opts = Options {
+            verbose: true,
+            ..OPTS
+        };
+        let footer = footer(&abs, &diff_report(), opts);
+        assert!(
+            footer.contains("attribution scale: 0.40 (noisy"),
+            "{footer}"
+        );
+    }
+
+    #[test]
+    fn no_files_leaves_the_summary_alone() {
+        let opts = Options {
+            files: false,
+            ..OPTS
+        };
+        assert_eq!(
+            render_overview(&abs_report(), &diff_report(), opts),
+            SUMMARY
+        );
+    }
+
+    /// Color is an input, not something the renderer discovers about the
+    /// process it happens to run in.
+    #[test]
+    fn color_paints_labels_and_magnitudes() {
+        let opts = Options {
+            color: true,
+            ..OPTS
+        };
+        let rendered = render_overview(&abs_report(), &diff_report(), opts);
+        let grey = "\u{1b}[38;5;8m";
+        let yellow = "\u{1b}[38;5;11m";
+        let reset = "\u{1b}[0m";
+        assert_eq!(
+            rendered.rsplit("\n\n").next().unwrap(),
+            format!(
+                " {grey}C(tree){reset} 10.0 KB   \
+                 {grey}review{reset} {yellow}2.0 KB{reset}   \
+                 {grey}ΔC{reset} {yellow}+1.0 KB{reset}   \
+                 {grey}1 skipped{reset}\n"
+            )
+        );
+        assert!(rendered.starts_with(grey), "table header must color too");
+    }
+
+    /// An empty diff still reports C(tree): the run is not a no-op.
+    #[test]
+    fn empty_diff_says_so_in_place_of_the_totals() {
+        let mut diff = diff_report();
+        diff.files.clear();
+        diff.skipped.clear();
+        assert_eq!(
+            footer(&abs_report(), &diff, OPTS),
+            " C(tree) 10.0 KB   no scorable changes against master\n"
+        );
+    }
 
     #[test]
     fn status_markers() {
-        let file = |status: Status, outlier| DiffFile {
-            path: "x".into(),
-            status,
-            review_bytes: 0.0,
-            review_raw: 0,
-            delta_bytes: 0.0,
-            new_lines: 0,
-            bytes_per_line: None,
-            density_outlier: outlier,
-        };
         let renamed = Status::Renamed {
             from: "a/b.rs".into(),
         };
-        assert_eq!(status_marker(&file(Status::Added, false)), Some("+".into()));
         assert_eq!(
-            status_marker(&file(Status::Deleted, false)),
+            status_marker(&diff_file(Status::Added, false)),
+            Some("+".into())
+        );
+        assert_eq!(
+            status_marker(&diff_file(Status::Deleted, false)),
             Some("−".into())
         );
         assert_eq!(
-            status_marker(&file(renamed, false)),
+            status_marker(&diff_file(renamed, false)),
             Some("→ a/b.rs".into())
         );
-        assert_eq!(status_marker(&file(Status::Modified, false)), None);
+        assert_eq!(status_marker(&diff_file(Status::Modified, false)), None);
         assert_eq!(
-            status_marker(&file(Status::Modified, true)),
+            status_marker(&diff_file(Status::Modified, true)),
             Some("⚠".into())
         );
         assert_eq!(
-            status_marker(&file(Status::Added, true)),
+            status_marker(&diff_file(Status::Added, true)),
             Some("+ ⚠".into())
         );
     }
