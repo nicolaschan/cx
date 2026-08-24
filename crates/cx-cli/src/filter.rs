@@ -2,11 +2,11 @@
 //! 1. `.gitattributes` linguist-generated / -vendored / -documentation
 //! 2. binary detection on content (UTF-16/32 aware)
 //! 3. ported linguist generated/vendored patterns
-//! 4. test files, unless `--include-tests` asks to keep them
-//! 5. `.cxignore`
+//! 4. prose, unless `--prose` asks to keep it
+//! 5. test files, unless `--include-tests` asks to keep them
+//! 6. `.cxignore`
 //!
-//! The density backstop (layer 6) lives in the report, not here — it
-//! flags, it doesn't drop.
+//! The density backstop (in the report, not here) flags, it doesn't drop.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,8 +15,10 @@ use anyhow::Result;
 use content_inspector::{ContentType, inspect};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use tokei::LanguageType;
 
 use crate::git::LinguistAttrs;
+use crate::language;
 
 /// Patterns ported from linguist's generated.rb / vendor.yml — the ~15
 /// that cover 95% of real repos.
@@ -52,6 +54,46 @@ const TEST_DIR_WORDS: [&str; 3] = ["e2e", "mocks", "testdata"];
 /// A test word means the same thing whichever separator surrounds it.
 const SEPARATORS: [char; 4] = ['/', '_', '-', '.'];
 
+/// Languages linguist types as prose, among those tokei recognises. The
+/// twelve it lacks (Textile, Pod, RDoc, Creole, Wikitext, RMarkdown, …)
+/// are rare enough to leave undetected rather than keep a second table.
+const PROSE_LANGUAGES: [LanguageType; 6] = [
+    LanguageType::AsciiDoc,
+    LanguageType::Markdown,
+    LanguageType::Mdx,
+    LanguageType::Org,
+    LanguageType::ReStructuredText,
+    LanguageType::Text,
+];
+
+/// Conventional documents named without an extension, so tokei has no
+/// language for them. Matched on the basename up to its first `.`, `-`
+/// or `_`, so `COPYING.LESSER`, `LICENSE-MIT` and `README_zh` count.
+const PROSE_FILENAMES: [&str; 8] = [
+    "LICENSE",
+    "LICENCE",
+    "COPYING",
+    "NOTICE",
+    "README",
+    "CHANGELOG",
+    "AUTHORS",
+    "CONTRIBUTORS",
+];
+
+/// Whether a blob is a prose document: a prose language by tokei's
+/// table, or — only when no language is found at all, so `LICENSE.py`
+/// is Python — a conventional extensionless document.
+fn is_prose(path: &str, content: &[u8]) -> bool {
+    match language::of(path, content) {
+        Some(lang) => PROSE_LANGUAGES.contains(&lang),
+        None => {
+            let file = path.rsplit('/').next().unwrap_or(path);
+            let stem = file.split(SEPARATORS).next().unwrap_or(file);
+            PROSE_FILENAMES.iter().any(|n| stem.eq_ignore_ascii_case(n))
+        }
+    }
+}
+
 /// Whether a path names a test, by convention alone — no language, build
 /// system, or parser. Words count only as whole segments, so `foo_test.go`,
 /// `foo-test.js`, `foo.test.ts`, `test_foo.py`, `tests.rs`, `__mocks__/`
@@ -76,6 +118,7 @@ pub struct Filter {
     attrs: HashMap<String, LinguistAttrs>,
     patterns: GlobSet,
     include_tests: bool,
+    prose: bool,
     cxignore: Option<Gitignore>,
 }
 
@@ -94,6 +137,7 @@ impl Filter {
         root: &Path,
         attrs: HashMap<String, LinguistAttrs>,
         include_tests: bool,
+        prose: bool,
     ) -> Result<Self> {
         let cxignore_path = root.join(".cxignore");
         let cxignore = cxignore_path.exists().then(|| {
@@ -105,6 +149,7 @@ impl Filter {
             attrs,
             patterns: glob_set(&LINGUIST_PATTERNS)?,
             include_tests,
+            prose,
             cxignore: cxignore.transpose()?,
         })
     }
@@ -129,6 +174,9 @@ impl Filter {
         if self.patterns.is_match(path) {
             return Some("generated/vendored pattern");
         }
+        if !self.prose && is_prose(path, content) {
+            return Some("prose");
+        }
         if !self.include_tests && is_test_path(path) {
             return Some("test");
         }
@@ -147,7 +195,7 @@ mod tests {
 
     /// The default filter: tests excluded.
     fn filter() -> Filter {
-        Filter::new(Path::new("/nonexistent"), HashMap::new(), false).unwrap()
+        Filter::new(Path::new("/nonexistent"), HashMap::new(), false, false).unwrap()
     }
 
     #[test]
@@ -178,9 +226,11 @@ mod tests {
             f.exclusion("img.png", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"),
             Some("binary")
         );
-        // UTF-16LE "hello" with BOM: full of NULs, but text.
+        // UTF-16LE "hello" with BOM: full of NULs, but text. Named
+        // `blob.bin` rather than `readme.txt` so this stays a
+        // binary-detection test and doesn't also exercise the prose layer.
         let utf16 = b"\xff\xfeh\0e\0l\0l\0o\0";
-        assert_eq!(f.exclusion("readme.txt", utf16), None);
+        assert_eq!(f.exclusion("blob.bin", utf16), None);
     }
 
     #[test]
@@ -193,7 +243,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let f = Filter::new(Path::new("/nonexistent"), attrs, false).unwrap();
+        let f = Filter::new(Path::new("/nonexistent"), attrs, false, false).unwrap();
         assert_eq!(
             f.exclusion("src/schema.rs", b"code"),
             Some("linguist-generated")
@@ -209,7 +259,8 @@ mod tests {
 
     #[test]
     fn drops_tests_unless_asked_to_include_them() {
-        let including = Filter::new(Path::new("/nonexistent"), HashMap::new(), true).unwrap();
+        let including =
+            Filter::new(Path::new("/nonexistent"), HashMap::new(), true, false).unwrap();
         for path in ["tests/e2e.rs", "src/parser_test.go", "web/app.spec.ts"] {
             assert_eq!(filter().exclusion(path, b"code"), Some("test"), "{path}");
             assert_eq!(including.exclusion(path, b"code"), None, "{path} included");
@@ -255,7 +306,67 @@ mod tests {
             ("api/conftest.py", false),
             ("src/main/java/FooTest.java", false),
         ] {
-            assert_eq!(f.exclusion(path, b"code").is_some(), is_test, "{path}");
+            // Compare against the specific reason, not `is_some`: the
+            // documents-about-tests rows are `.md`, which the earlier prose
+            // layer catches, so `is_some` would conflate prose with test.
+            assert_eq!(
+                f.exclusion(path, b"code") == Some("test"),
+                is_test,
+                "{path}"
+            );
         }
+    }
+
+    /// Prose is what tokei types as such plus the conventional
+    /// extensionless documents; data and markup are code.
+    #[test]
+    fn skips_prose_unless_asked_to_keep_it() {
+        let f = filter();
+        for path in [
+            "README.md",
+            "docs/guide.markdown",
+            "docs/page.mdx",
+            "CHANGES.rst",
+            "notes.txt",
+            "book/ch1.adoc",
+            "todo.org",
+            "LICENSE",
+            "COPYING",
+            "COPYING.LESSER",
+            "LICENSE-MIT",
+            "README",
+            "sub/NOTICE",
+            "AUTHORS",
+            "CONTRIBUTORS",
+            "CHANGELOG",
+            "ChangeLog",
+        ] {
+            assert_eq!(f.exclusion(path, b"words"), Some("prose"), "{path}");
+        }
+        for path in [
+            "ci.yaml",
+            "package.json",
+            "index.html",
+            "Cargo.toml",
+            "style.css",
+            "LICENSE.py",
+            "README.rs",
+            "src/main.rs",
+            "Makefile",
+        ] {
+            assert_eq!(f.exclusion(path, b"code"), None, "{path}");
+        }
+
+        let keep = Filter::new(Path::new("/nonexistent"), HashMap::new(), false, true).unwrap();
+        assert_eq!(keep.exclusion("README.md", b"words"), None);
+        assert_eq!(keep.exclusion("LICENSE", b"words"), None);
+    }
+
+    /// A prose document about tests is prose first (prose precedes the
+    /// test layer), whether or not tests are being scored.
+    #[test]
+    fn prose_is_recognised_before_tests() {
+        let f = filter();
+        assert_eq!(f.exclusion("docs/tests/plan.md", b"words"), Some("prose"));
     }
 }

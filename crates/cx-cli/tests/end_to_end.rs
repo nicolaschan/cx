@@ -552,3 +552,212 @@ fn a_submodule_is_skipped_not_fatal() {
         "submodule must not be scored in diff"
     );
 }
+
+/// A comment-only change is free by default: both sides reduce to the
+/// same code, and the line count is of that code. With comments scored,
+/// sixty lines of novel prose cost what novel content costs.
+#[test]
+fn comments_are_stripped_unless_asked_to_score_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::create_dir(root.join("src")).unwrap();
+    let code = gen_code(1, 120);
+    fs::write(root.join("src/lib.rs"), &code).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    let comments: String = String::from_utf8(gen_code(9, 60))
+        .unwrap()
+        .lines()
+        .map(|l| format!("// {l}\n"))
+        .collect();
+    fs::write(
+        root.join("src/lib.rs"),
+        [comments.as_bytes(), &code].concat(),
+    )
+    .unwrap();
+    git(root, &["commit", "-q", "-am", "comments"]);
+
+    let run = |pinned: Option<&str>, flag: Option<&str>| -> serde_json::Value {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+        cmd.current_dir(root)
+            .args(["diff", "--json", "--committed"])
+            .args(flag)
+            .env_remove("CX_COMMENTS");
+        if let Some(value) = pinned {
+            cmd.env("CX_COMMENTS", value);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        report["files"][0].clone()
+    };
+
+    let stripped = run(None, None);
+    assert_eq!(stripped["path"], "src/lib.rs");
+    assert_eq!(
+        stripped["new_lines"], 120,
+        "lines are counted after stripping"
+    );
+    assert!(
+        stripped["review_bytes"].as_f64().unwrap() < 64.0,
+        "a comment-only change is ≈ free to review: {stripped}"
+    );
+    assert!(stripped["delta_bytes"].as_f64().unwrap().abs() < 64.0);
+
+    for kept in [run(None, Some("--comments")), run(Some("1"), None)] {
+        assert_eq!(kept["new_lines"], 180);
+        assert!(
+            kept["review_bytes"].as_f64().unwrap() > 300.0,
+            "novel comments cost review attention when scored: {kept}"
+        );
+        assert!(kept["delta_bytes"].as_f64().unwrap() > 300.0);
+    }
+    assert_eq!(run(Some("1"), Some("--comments=false"))["new_lines"], 120);
+}
+
+/// The mirror of the add case: deleting a file's comments is also ≈ free,
+/// which can only hold if the *old* side and the tree reference are
+/// stripped the same way the new side is — not just the new item.
+#[test]
+fn deleting_comments_is_free_because_every_side_is_stripped() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::create_dir(root.join("src")).unwrap();
+    let code = gen_code(1, 120);
+    // A second file that never changes: it sits in the tree reference and
+    // the remainder on both sides, so if references weren't stripped its
+    // comments would perturb the neighbouring scores.
+    let other: String = String::from_utf8(gen_code(5, 80))
+        .unwrap()
+        .lines()
+        .map(|l| format!("{l} // trailing note\n"))
+        .collect();
+    fs::write(root.join("src/other.rs"), &other).unwrap();
+    let comments: String = String::from_utf8(gen_code(9, 60))
+        .unwrap()
+        .lines()
+        .map(|l| format!("// {l}\n"))
+        .collect();
+    fs::write(
+        root.join("src/lib.rs"),
+        [comments.as_bytes(), &code].concat(),
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    fs::write(root.join("src/lib.rs"), &code).unwrap();
+    git(root, &["commit", "-q", "-am", "drop comments"]);
+
+    let file = |flag: Option<&str>| -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_cx"))
+            .current_dir(root)
+            .args(["diff", "--json", "--committed"])
+            .args(flag)
+            .env_remove("CX_COMMENTS")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == "src/lib.rs")
+            .expect("lib.rs in report")
+            .clone()
+    };
+
+    let stripped = file(None);
+    assert!(
+        stripped["delta_bytes"].as_f64().unwrap().abs() < 64.0,
+        "deleting only comments must not refund complexity: {stripped}"
+    );
+    assert!(stripped["review_bytes"].as_f64().unwrap() < 64.0);
+
+    let kept = file(Some("--comments"));
+    assert!(
+        kept["delta_bytes"].as_f64().unwrap() < -300.0,
+        "with --comments, dropping 60 comment lines refunds complexity: {kept}"
+    );
+}
+
+/// Prose is out of the universe by default and fully scored on request,
+/// through the flag, the environment default, and the per-run veto.
+#[test]
+fn prose_is_skipped_by_default_and_scored_on_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), gen_code(1, 40)).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    fs::write(root.join("README.md"), gen_code(31, 40)).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-am", "docs"]);
+
+    let run = |pinned: Option<&str>, flag: Option<&str>| -> serde_json::Value {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+        cmd.current_dir(root)
+            .args(["diff", "--json", "--committed"])
+            .args(flag)
+            .env_remove("CX_PROSE");
+        if let Some(value) = pinned {
+            cmd.env("CX_PROSE", value);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let skipped_as_prose = |report: &serde_json::Value| {
+        report["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["path"] == "README.md" && s["reason"] == "prose")
+    };
+    let scored = |report: &serde_json::Value| {
+        report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "README.md" && f["review_bytes"].as_f64().unwrap() > 200.0)
+    };
+
+    // Skipped when off (default, pinned false, veto); scored when on.
+    for (pinned, flag) in [
+        (None, None),
+        (Some("0"), None),
+        (Some("1"), Some("--prose=false")),
+    ] {
+        let report = run(pinned, flag);
+        assert!(skipped_as_prose(&report), "prose off: {pinned:?} {flag:?}");
+        assert!(!scored(&report));
+    }
+    for (pinned, flag) in [
+        (None, Some("--prose")),
+        (Some("1"), None),
+        (Some("true"), None),
+    ] {
+        let report = run(pinned, flag);
+        assert!(scored(&report), "prose on: {pinned:?} {flag:?}");
+        assert!(!skipped_as_prose(&report));
+    }
+}

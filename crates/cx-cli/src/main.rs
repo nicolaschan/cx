@@ -47,6 +47,32 @@ struct CommonArgs {
         value_parser = BoolishValueParser::new(),
     )]
     include_tests: bool,
+    /// Score comments too. By default every file is reduced to code —
+    /// comments stripped, blank lines dropped — before scoring. Takes an
+    /// optional value so a pinned default can be vetoed for one run:
+    /// `--comments=false`.
+    #[arg(
+        long,
+        env = "CX_COMMENTS",
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = BoolishValueParser::new(),
+    )]
+    comments: bool,
+    /// Score prose files too — Markdown, reStructuredText, plain text,
+    /// AsciiDoc, Org, and extensionless documents such as LICENSE. By
+    /// default they are skipped. Takes an optional value so a pinned
+    /// default can be vetoed for one run: `--prose=false`.
+    #[arg(
+        long,
+        env = "CX_PROSE",
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = BoolishValueParser::new(),
+    )]
+    prose: bool,
     /// Hide the per-file breakdown; show the summary line only.
     #[arg(long)]
     no_files: bool,
@@ -74,6 +100,8 @@ impl DiffArgs {
             base: self.base,
             side: common.side(),
             include_tests: common.include_tests,
+            comments: common.comments,
+            prose: common.prose,
         }
     }
 }
@@ -92,6 +120,8 @@ impl CommonArgs {
     fn abs_options(&self) -> AbsOptions {
         AbsOptions {
             include_tests: self.include_tests,
+            comments: self.comments,
+            prose: self.prose,
             side: self.side(),
         }
     }
