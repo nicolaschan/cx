@@ -299,19 +299,18 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         .filter_map(|item| churn.get(&item.path))
         .fold((0, 0), |(a, d), (added, deleted)| (a + added, d + deleted));
 
-    let totals = Totals {
-        review_bytes: files.iter().map(|f| f.review_bytes).sum(),
-        delta_bytes: files.iter().map(|f| f.delta_bytes).sum(),
-        added_lines,
-        deleted_lines,
-    };
     Ok(DiffReport {
         version: VersionInfo::for_scorer(&scorer),
         base,
         merge_base,
+        totals: Totals {
+            review_bytes: files.iter().map(|f| f.review_bytes).sum(),
+            delta_bytes: files.iter().map(|f| f.delta_bytes).sum(),
+            added_lines,
+            deleted_lines,
+        },
         files,
         skipped,
-        totals,
     })
 }
 
@@ -355,7 +354,7 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
         version: VersionInfo::for_scorer(&scorer),
         snapshot: opts.side.label(),
         file_count: kept.len(),
-        raw_bytes: kept_contents.iter().map(|c| c.len() as u64).sum(),
+        raw_bytes: tree.bytes(),
         compressed_bytes: scores.iter().sum(),
         files,
     })

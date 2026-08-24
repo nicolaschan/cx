@@ -92,14 +92,14 @@ pub struct Attribution<'a> {
 }
 
 impl Attribution<'_> {
-    fn parts(&self) -> impl Iterator<Item = &[u8]> {
-        self.reference.iter().chain(self.items).copied()
-    }
-
     /// The stream's length: bytes to compress, the unit progress advances
     /// in.
     pub fn bytes(&self) -> u64 {
-        self.parts().map(|part| part.len() as u64).sum()
+        self.reference
+            .iter()
+            .chain(self.items)
+            .map(|part| part.len() as u64)
+            .sum()
     }
 
     /// Each item's score, in order. `progress` receives each part's
@@ -121,7 +121,7 @@ impl Attribution<'_> {
 
         let mut out: Vec<u8> = Vec::new();
         let mut feed = |part: &[u8]| -> u64 {
-            let before = out.len();
+            out.clear();
             let mut source = InBuffer::around(part);
             loop {
                 // Room for at least one more block, so every call makes
@@ -138,7 +138,7 @@ impl Attribution<'_> {
                 }
             }
             progress(part.len() as u64);
-            (out.len() - before) as u64
+            out.len() as u64
         };
         for part in self.reference {
             feed(part);
