@@ -17,6 +17,7 @@ Spec: `docs/superpowers/specs/2026-08-23-code-only-scoring-design.md`. Work in t
 | File | Responsibility |
 |---|---|
 | `crates/cx-cli/Cargo.toml` | add the `tokei` dependency |
+| `crates/cx-cli/src/language.rs` (new) | `of(path, bytes)`: which tokei language a blob is, from its name or shebang — never from disk |
 | `crates/cx-cli/src/strip.rs` (new) | `code_only(path, bytes)`: comments out, blank lines dropped, via a `Syntax` built from tokei |
 | `crates/cx-cli/src/lib.rs` | declare `strip` |
 | `crates/cx-cli/src/pipeline.rs` | `Scope`; `prepare` (filter → strip) at the one blob entry point; diff/abs use it |
@@ -629,9 +630,10 @@ Module doc — replace the numbered list with:
 Imports — add:
 
 ```rust
-use tokei::{Config, LanguageType};
+use tokei::LanguageType;
 
 use crate::git::LinguistAttrs;
+use crate::language;
 use crate::pipeline::Scope;
 ```
 
@@ -664,11 +666,11 @@ const PROSE_FILENAMES: [&str; 8] = [
     "CONTRIBUTORS",
 ];
 
-/// Whether a path names a prose document: a prose language by tokei's
-/// table, or — only when tokei finds no language at all, so `LICENSE.py`
+/// Whether a blob is a prose document: a prose language by tokei's
+/// table, or — only when no language is found at all, so `LICENSE.py`
 /// is Python — a conventional extensionless document.
-fn is_prose(path: &str) -> bool {
-    match LanguageType::from_path(path, &Config::default()) {
+fn is_prose(path: &str, content: &[u8]) -> bool {
+    match language::of(path, content) {
         Some(lang) => PROSE_LANGUAGES.contains(&lang),
         None => {
             let file = path.rsplit('/').next().unwrap_or(path);
@@ -707,7 +709,7 @@ pub struct Filter {
 In `exclusion`, between the pattern check and the test check:
 
 ```rust
-        if !self.prose && is_prose(path) {
+        if !self.prose && is_prose(path, content) {
             return Some("prose");
         }
 ```
