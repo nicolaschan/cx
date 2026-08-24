@@ -24,11 +24,19 @@ Two additions to `cx-cli`. `cx-core` is unchanged: bytes in, scores out,
 no new dependencies.
 
 **`filter.rs` gains a prose layer.** A file whose tokei language is one
-of linguist's `type: prose` languages (Markdown, reStructuredText, Text,
-AsciiDoc, Org, Textile, Pod, RDoc, Creole, Wikitext, RMarkdown, …) is
-excluded with reason `prose`, unless `--prose`. The set is a list of
-`tokei::LanguageType`s, so every extension tokei maps to those languages
-comes along. Order in the stack: after the generated/vendored patterns,
+of linguist's `type: prose` languages is excluded with reason `prose`,
+unless `--prose`. The set is a list of `tokei::LanguageType`s — tokei
+knows six of linguist's eighteen: Markdown, Mdx, reStructuredText, Text,
+AsciiDoc, Org — so every extension tokei maps to those languages comes
+along (`.md`, `.markdown`, `.mdx`, `.rst`, `.txt`, `.text`, `.adoc`,
+`.asciidoc`, `.org`). The twelve tokei lacks (Textile, Pod, RDoc, Creole,
+Wikitext, RMarkdown, …) are rare enough to leave undetected rather than
+keep a second table. Conventional documents with no extension —
+`LICENSE`, `COPYING`, `README`, `CHANGELOG`, `NOTICE`, `AUTHORS`,
+`CONTRIBUTORS`, plus `LICENSE-MIT`/`COPYING.LESSER`-style variants —
+have no language for tokei to find, so they are matched by basename
+instead, only when tokei found nothing (`LICENSE.py` is Python).
+Order in the stack: after the generated/vendored patterns,
 before the test layer, so `docs/2026-04-27-web-e2e-design.md` reads
 `prose` rather than being kept because plural `specs/` is documentation.
 Data and markup files (JSON, YAML, TOML, HTML, CSS) stay in: a `Cargo.toml`
