@@ -16,9 +16,9 @@ const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/maste
 pub struct DiffOptions {
     pub base: Option<String>,
     pub side: Side,
-    /// Exclude test files from the universe entirely — they are then in
-    /// no reference and no scoring pass, and appear as skipped.
-    pub ignore_tests: bool,
+    /// Score test files too. Otherwise they leave the universe entirely:
+    /// in no reference and no scoring pass, and reported as skipped.
+    pub include_tests: bool,
 }
 
 #[derive(Serialize)]
@@ -106,8 +106,8 @@ pub struct AbsOptions {
     /// Skip per-file contributions, leaving one joint compression —
     /// much faster on big trees.
     pub no_files: bool,
-    /// Exclude test files from the universe entirely.
-    pub ignore_tests: bool,
+    /// Score test files too; otherwise they leave the universe entirely.
+    pub include_tests: bool,
     pub side: Side,
 }
 
@@ -187,7 +187,7 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     let filter = Filter::new(
         git.root(),
         git.linguist_attrs(&attr_paths)?,
-        opts.ignore_tests,
+        opts.include_tests,
     )?;
 
     // The universe is kept files only: a file the filter excludes exists
@@ -354,7 +354,7 @@ pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
     let filter = Filter::new(
         git.root(),
         git.linguist_attrs(&attr_paths)?,
-        opts.ignore_tests,
+        opts.include_tests,
     )?;
     let kept: Vec<(&String, &[u8])> = contents
         .iter()

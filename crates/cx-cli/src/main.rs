@@ -34,18 +34,18 @@ struct CommonArgs {
     /// working tree.
     #[arg(long)]
     committed: bool,
-    /// Exclude test files everywhere, by naming convention. Takes an
-    /// optional value so a pinned default can be vetoed for one run:
-    /// `--ignore-tests=false`.
+    /// Score test files too. They are excluded by default, by naming
+    /// convention. Takes an optional value so a pinned default can be
+    /// vetoed for one run: `--include-tests=false`.
     #[arg(
         long,
-        env = "CX_IGNORE_TESTS",
+        env = "CX_INCLUDE_TESTS",
         num_args = 0..=1,
         default_value_t = false,
         default_missing_value = "true",
         value_parser = BoolishValueParser::new(),
     )]
-    ignore_tests: bool,
+    include_tests: bool,
     /// Hide the per-file breakdown; show the summary line only.
     #[arg(long)]
     no_files: bool,
@@ -73,7 +73,7 @@ impl DiffArgs {
         DiffOptions {
             base: self.base,
             side: common.side(),
-            ignore_tests: common.ignore_tests,
+            include_tests: common.include_tests,
         }
     }
 }
@@ -92,7 +92,7 @@ impl CommonArgs {
     fn abs_options(&self) -> AbsOptions {
         AbsOptions {
             no_files: self.no_files,
-            ignore_tests: self.ignore_tests,
+            include_tests: self.include_tests,
             side: self.side(),
         }
     }

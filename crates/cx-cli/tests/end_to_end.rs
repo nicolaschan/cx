@@ -40,7 +40,7 @@ fn setup() -> (tempfile::TempDir, Git) {
     git(root, &["checkout", "-q", "-b", "feature"]);
     // Novel logic: new content unlike anything in the tree.
     fs::write(root.join("src/novel.rs"), gen_code(99, 120)).unwrap();
-    // A substantial new test, for --ignore-tests.
+    // A substantial new test, for --include-tests.
     fs::create_dir(root.join("tests")).unwrap();
     fs::write(root.join("tests/novel_test.rs"), gen_code(77, 120)).unwrap();
     // Pure move: same bytes, new path.
@@ -133,41 +133,42 @@ fn scores_a_realistic_branch() {
 /// Line churn, counted as git counts it: the fixture adds novel.rs and
 /// novel_test.rs (120 lines each) and deletes gone.rs (120), while the
 /// rename of mover.rs and the skipped lockfile and binary count for
-/// nothing.
+/// nothing. Tests are out by default, so novel_test.rs's 120 added
+/// lines only appear once `--include-tests` asks for them.
 #[test]
 fn line_churn_counts_what_git_counts() {
     let (_dir, git) = setup();
     let report = pipeline::diff(&git, &DiffOptions::default()).unwrap();
     assert_eq!(
         (report.totals.added_lines, report.totals.deleted_lines),
-        (240, 120)
+        (120, 120)
     );
 
-    // Excluding the test file drops exactly its lines, no others.
-    let without = pipeline::diff(
+    // Including the test file adds exactly its lines, no others.
+    let with = pipeline::diff(
         &git,
         &DiffOptions {
-            ignore_tests: true,
+            include_tests: true,
             ..Default::default()
         },
     )
     .unwrap();
     assert_eq!(
-        (without.totals.added_lines, without.totals.deleted_lines),
-        (120, 120)
+        (with.totals.added_lines, with.totals.deleted_lines),
+        (240, 120)
     );
 }
 
 /// What excluding tests must and must not do to the numbers. That the
 /// flag reaches scoring at all is covered through the binary below.
 #[test]
-fn ignoring_tests_drops_their_cost_and_leaves_the_rest() {
+fn excluding_tests_drops_their_cost_and_leaves_the_rest() {
     let (_dir, git) = setup();
-    let scored = |ignore_tests| {
+    let scored = |include_tests| {
         pipeline::diff(
             &git,
             &DiffOptions {
-                ignore_tests,
+                include_tests,
                 ..Default::default()
             },
         )
@@ -179,7 +180,7 @@ fn ignoring_tests_drops_their_cost_and_leaves_the_rest() {
             .find(|f| f.path == path)
             .map(|f| f.review_bytes)
     };
-    let (with, without) = (scored(false), scored(true));
+    let (with, without) = (scored(true), scored(false));
 
     assert!(
         review(&with, "tests/novel_test.rs").is_some_and(|b| b > 500.0),
@@ -205,25 +206,27 @@ fn ignoring_tests_drops_their_cost_and_leaves_the_rest() {
 /// The environment default through the real binary: a pinned value is
 /// only useful if it reaches scoring and a single run can still veto it.
 #[test]
-fn ignore_tests_can_be_pinned_through_the_environment() {
+fn include_tests_can_be_pinned_through_the_environment() {
     let (dir, _git) = setup();
+    // `expected` is whether the test file ends up skipped, so it reads
+    // as the negation of whatever asked for tests to be included.
     for (pinned, flag, expected) in [
-        (None, None, false),
-        (Some("1"), None, true),
-        (Some("true"), None, true),
+        (None, None, true),
+        (Some("1"), None, false),
+        (Some("true"), None, false),
         // A set variable must not mean "true" whatever its value.
-        (Some("0"), None, false),
-        (Some("1"), Some("--ignore-tests=false"), false),
-        (None, Some("--ignore-tests"), true),
+        (Some("0"), None, true),
+        (Some("1"), Some("--include-tests=false"), true),
+        (None, Some("--include-tests"), false),
     ] {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
         cmd.current_dir(dir.path())
             .args(["diff", "--json"])
             .args(flag);
         match pinned {
-            Some(value) => cmd.env("CX_IGNORE_TESTS", value),
+            Some(value) => cmd.env("CX_INCLUDE_TESTS", value),
             // An inherited setting must not decide this test's outcome.
-            None => cmd.env_remove("CX_IGNORE_TESTS"),
+            None => cmd.env_remove("CX_INCLUDE_TESTS"),
         };
         let out = cmd.output().unwrap();
         assert!(
@@ -237,7 +240,7 @@ fn ignore_tests_can_be_pinned_through_the_environment() {
             .unwrap()
             .iter()
             .any(|s| s["path"] == "tests/novel_test.rs" && s["reason"] == "test");
-        assert_eq!(ignored, expected, "CX_IGNORE_TESTS={pinned:?}, {flag:?}");
+        assert_eq!(ignored, expected, "CX_INCLUDE_TESTS={pinned:?}, {flag:?}");
     }
 }
 
@@ -279,13 +282,13 @@ fn tree_reports_absolute_complexity_with_contributions() {
         },
     )
     .unwrap();
-    // keep.rs + moved.rs + novel.rs + tests/novel_test.rs;
-    // Cargo.lock and logo.png excluded.
-    assert_eq!(report.file_count, 4, "kept files at HEAD");
+    // keep.rs + moved.rs + novel.rs; Cargo.lock, logo.png and
+    // tests/novel_test.rs excluded.
+    assert_eq!(report.file_count, 3, "kept files at HEAD");
     assert!(report.compressed_bytes > 0);
     assert!(report.compressed_bytes < report.raw_bytes);
 
-    assert_eq!(report.files.len(), 4);
+    assert_eq!(report.files.len(), 3);
     let sum: f64 = report.files.iter().map(|f| f.bytes).sum();
     assert!(
         (sum - report.compressed_bytes as f64).abs() < 1e-6 * sum,
@@ -311,7 +314,7 @@ fn tree_contributions_are_suppressable() {
         },
     )
     .unwrap();
-    assert_eq!(report.file_count, 4);
+    assert_eq!(report.file_count, 3);
     assert!(report.files.is_empty());
     assert_eq!(report.scale, 1.0);
 }
@@ -402,8 +405,7 @@ fn abs_measures_the_snapshot_it_is_asked_for() {
             vec![
                 "src/keep.rs".to_owned(),
                 "src/moved.rs".to_owned(),
-                "src/novel.rs".to_owned(),
-                "tests/novel_test.rs".to_owned()
+                "src/novel.rs".to_owned()
             ],
             "HEAD"
         )
@@ -415,8 +417,7 @@ fn abs_measures_the_snapshot_it_is_asked_for() {
                 "src/keep.rs".to_owned(),
                 "src/moved.rs".to_owned(),
                 "src/novel.rs".to_owned(),
-                "src/staged.rs".to_owned(),
-                "tests/novel_test.rs".to_owned()
+                "src/staged.rs".to_owned()
             ],
             "index"
         )
@@ -430,8 +431,7 @@ fn abs_measures_the_snapshot_it_is_asked_for() {
                 "src/moved.rs".to_owned(),
                 "src/novel.rs".to_owned(),
                 "src/staged.rs".to_owned(),
-                "src/untracked.rs".to_owned(),
-                "tests/novel_test.rs".to_owned()
+                "src/untracked.rs".to_owned()
             ],
             "worktree"
         )
