@@ -53,8 +53,7 @@ struct CommonArgs {
     /// Show only the N biggest files/directories in the breakdown.
     #[arg(short = 'n', long, env = "CX_TOP", default_value_t = 30)]
     top: usize,
-    /// Also show attribution scale, compressor provenance, and the
-    /// skipped files by name.
+    /// Also show compressor provenance and the skipped files by name.
     #[arg(short = 'v', long)]
     verbose: bool,
     #[arg(long)]

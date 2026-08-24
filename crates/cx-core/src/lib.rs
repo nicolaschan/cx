@@ -80,8 +80,8 @@ impl Scorer {
 
 /// One zstd stream — reference, then items — flushed at every part
 /// boundary, so an item's score is the bytes its part added:
-/// C(item_i | reference ++ items[..i]), sequential chain-rule scoring, so
-/// a pattern repeated across items is charged to its first occurrence and
+/// C(item_i | reference ++ items[..i]). This is chain-rule scoring: a
+/// pattern repeated across items is charged to its first occurrence and
 /// near-free afterwards.
 pub struct Attribution<'a> {
     scorer: &'a Scorer,

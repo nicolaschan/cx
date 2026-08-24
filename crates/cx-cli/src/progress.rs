@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 
 /// Whether progress may draw, decided once by the caller the way color
 /// is for stdout.
@@ -15,20 +15,19 @@ pub struct Progress {
 impl Progress {
     /// A bar over `cost` bytes: the returned sink advances it, and
     /// dropping the sink clears it.
-    pub fn phase(self, label: &'static str, cost: u64) -> impl Fn(u64) + Sync {
-        let target = if self.visible {
-            ProgressDrawTarget::stderr()
-        } else {
-            ProgressDrawTarget::hidden()
-        };
+    pub fn bar(self, label: &'static str, cost: u64) -> impl Fn(u64) + Sync {
         let style = ProgressStyle::with_template(
             " {spinner:.dim} {msg:.dim} {wide_bar} {percent:>3}% {eta:.dim}",
         )
         .expect("static template")
         .progress_chars("██░");
-        let bar = ProgressBar::with_draw_target(Some(cost), target)
-            .with_style(style)
-            .with_message(label);
+        let bar = if self.visible {
+            ProgressBar::new(cost)
+        } else {
+            ProgressBar::hidden()
+        }
+        .with_style(style)
+        .with_message(label);
         bar.enable_steady_tick(Duration::from_millis(100));
         move |bytes| bar.inc(bytes)
     }

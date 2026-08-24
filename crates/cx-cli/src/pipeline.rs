@@ -243,10 +243,9 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         .map(|p| old_tree[p].as_slice())
         .collect();
 
-    // The three passes (plan §3): metric 1 against the full old tree,
-    // metric 2 as new-vs-old against the neutral remainder.
-    // A missing side is the empty file, which scores 0, so every pass is
-    // indexed like `items`.
+    // Metric 1 is new against the full old tree; metric 2 is new minus
+    // old, each against the neutral remainder. A missing side is the
+    // empty file, which scores 0, so every pass is indexed like `items`.
     let new_items: Vec<&[u8]> = items
         .iter()
         .map(|i| i.new.as_deref().unwrap_or_default())
@@ -260,11 +259,11 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         scorer.attribution(&remainder, &new_items),
         scorer.attribution(&remainder, &old_items),
     ];
-    let phase = &progress.phase("diff", passes.iter().map(|pass| pass.bytes()).sum());
+    let bar = &progress.bar("diff", passes.iter().map(|pass| pass.bytes()).sum());
     let [review, delta_new, delta_old] = std::thread::scope(|scope| {
         passes
             .each_ref()
-            .map(|pass| scope.spawn(move || pass.run(phase)))
+            .map(|pass| scope.spawn(move || pass.run(bar)))
             .map(|stream| stream.join().expect("stream thread"))
     });
 
@@ -329,8 +328,8 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
     let kept_contents: Vec<&[u8]> = kept.iter().map(|(_, c)| *c).collect();
 
     let scorer = Scorer::default();
-    let tree = scorer.attribution(&[], &kept_contents);
-    let scores = tree.run(progress.phase("C(tree)", tree.bytes()));
+    let pass = scorer.attribution(&[], &kept_contents);
+    let scores = pass.run(progress.bar("C(tree)", pass.bytes()));
     let mut files: Vec<AbsFile> = kept
         .iter()
         .zip(&scores)
@@ -346,7 +345,7 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
         version: VersionInfo::for_scorer(&scorer),
         snapshot: opts.side.label(),
         file_count: kept.len(),
-        raw_bytes: tree.bytes(),
+        raw_bytes: pass.bytes(),
         compressed_bytes: scores.iter().sum(),
         files,
     })

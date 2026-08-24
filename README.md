@@ -2,8 +2,8 @@
 
 Score git diffs by **marginal description length**: how much new information
 a change adds, conditioned on what the codebase already contains. The
-estimator is one zstd stream — the codebase, then the change, flushed at
-every file, so a file's score is the bytes it adds — language-independent,
+estimator is one zstd stream, the codebase then the change —
+language-independent,
 grounded in MDL / the software-naturalness literature (Hindle et al. 2012;
 Ray et al. 2016).
 
@@ -76,9 +76,10 @@ bar on stderr tracks the run while it is a terminal.
 `--json` emits the full report (per-file scores, skipped files, totals,
 compressor version) — the stable contract for tooling.
 
-Per-file attribution is the chain rule: a pattern repeated across files
-in one PR is charged once, at its first occurrence, and per-file scores
-sum exactly to the total.
+The stream is flushed at every file, so a file's score is the bytes it
+adds — the chain rule: a pattern repeated across files in one PR is
+charged once, at its first occurrence, and per-file scores sum exactly to
+the total.
 
 Files are filtered before scoring: `.gitattributes` linguist annotations,
 binary detection, common generated/vendored patterns (lockfiles, `dist/`,
