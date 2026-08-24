@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use cx_cli::git::Git;
+use cx_cli::git::{Git, Side};
 use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
 use cx_cli::progress::Progress;
 use cx_cli::report;
@@ -28,6 +28,13 @@ struct Cli {
 /// the environment means the same thing in all of them.
 #[derive(Args)]
 struct CommonArgs {
+    /// Score the index: staged changes only.
+    #[arg(long, conflicts_with = "committed")]
+    staged: bool,
+    /// Score HEAD: committed code only, ignoring the index and the
+    /// working tree.
+    #[arg(long)]
+    committed: bool,
     /// Exclude test files everywhere, by naming convention. Takes an
     /// optional value so a pinned default can be vetoed for one run:
     /// `--ignore-tests=false`.
@@ -60,31 +67,37 @@ struct DiffArgs {
     /// Base ref to diff against (default: main/master merge-base).
     #[arg(long, env = "CX_BASE")]
     base: Option<String>,
-    /// Diff the index instead of HEAD.
-    #[arg(long)]
-    staged: bool,
 }
 
 impl DiffArgs {
     fn options(self, common: &CommonArgs) -> DiffOptions {
         DiffOptions {
             base: self.base,
-            staged: self.staged,
+            side: common.side(),
             ignore_tests: common.ignore_tests,
         }
     }
 }
 
 impl CommonArgs {
+    fn side(&self) -> Side {
+        if self.committed {
+            Side::Head
+        } else if self.staged {
+            Side::Index
+        } else {
+            Side::Worktree
+        }
+    }
+
     fn abs_options(&self) -> AbsOptions {
         AbsOptions {
             no_files: self.no_files,
             ignore_tests: self.ignore_tests,
+            side: self.side(),
         }
     }
 
-    /// The one place that asks where the output is going: the renderer
-    /// takes the answer as an input rather than sniffing it itself.
     fn report_options(&self) -> report::Options {
         report::Options {
             top: self.top,
@@ -97,7 +110,8 @@ impl CommonArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Score the changes between a base branch and HEAD (or the index).
+    /// Score the changes between a base branch and the working tree, the
+    /// index, or HEAD.
     Diff {
         #[command(flatten)]
         diff: DiffArgs,
@@ -106,7 +120,7 @@ enum Cmd {
         #[command(flatten)]
         common: CommonArgs,
     },
-    /// Absolute C(tree) of HEAD — the trend-line number.
+    /// Absolute C(tree) — the trend-line number.
     Abs {
         #[command(flatten)]
         common: CommonArgs,

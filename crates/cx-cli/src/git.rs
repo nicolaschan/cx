@@ -2,7 +2,7 @@
 //! Shelling out is deliberate (no libgit2/gix): the surface is tiny and
 //! `git` is always present where cx runs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -25,6 +25,24 @@ pub enum Status {
 pub struct Change {
     pub path: String,
     pub status: Status,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Side {
+    Head,
+    Index,
+    #[default]
+    Worktree,
+}
+
+impl Side {
+    pub fn label(self) -> &'static str {
+        match self {
+            Side::Head => "HEAD",
+            Side::Index => "index",
+            Side::Worktree => "worktree",
+        }
+    }
 }
 
 impl Git {
@@ -98,18 +116,41 @@ impl Git {
         Ok(split_nul(&out))
     }
 
-    /// Changed files between `from` and either HEAD or the index.
-    pub fn changes(&self, from: &str, staged: bool) -> Result<Vec<Change>> {
-        let mut args = vec!["diff", "--name-status", "-z", "--find-renames"];
-        if staged {
+    /// Shared so both listings below describe the same diff, renames
+    /// included.
+    pub fn list(&self, side: Side) -> Result<Vec<String>> {
+        if side == Side::Head {
+            return self.ls_tree("HEAD");
+        }
+        let mut paths = split_nul(&self.run(&["ls-files", "-z", "--cached"])?);
+        if side == Side::Worktree {
+            paths.extend(self.untracked()?);
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    fn untracked(&self) -> Result<Vec<String>> {
+        let out = self.run(&["ls-files", "-z", "--others", "--exclude-standard"])?;
+        Ok(split_nul(&out))
+    }
+
+    fn diff(&self, format: &str, from: &str, side: Side) -> Result<Vec<String>> {
+        let mut args = vec!["diff", format, "-z", "--find-renames"];
+        if side == Side::Index {
             args.push("--cached");
         }
         args.push(from);
-        if !staged {
+        if side == Side::Head {
             args.push("HEAD");
         }
-        let out = self.run(&args)?;
-        let fields = split_nul(&out);
+        Ok(split_nul(&self.run(&args)?))
+    }
+
+    /// Changed files between `from` and `side`.
+    pub fn changes(&self, from: &str, side: Side) -> Result<Vec<Change>> {
+        let fields = self.diff("--name-status", from, side)?;
         let mut changes = Vec::new();
         let mut it = fields.into_iter();
         while let Some(status) = it.next() {
@@ -146,16 +187,70 @@ impl Git {
                 _ => {} // unmerged/unknown: nothing scorable
             }
         }
+        if side == Side::Worktree {
+            let seen: HashSet<String> = changes.iter().map(|c| c.path.clone()).collect();
+            for path in self.untracked()? {
+                if !seen.contains(&path) {
+                    changes.push(Change {
+                        path,
+                        status: Status::Added,
+                    });
+                }
+            }
+        }
         Ok(changes)
     }
 
-    /// Bulk-fetch blob contents. Specs are object names (`<rev>:<path>`,
-    /// `:0:<path>`, …); returns None per spec that doesn't resolve or
-    /// names a non-blob (e.g. a submodule's commit object).
-    pub fn blobs(&self, specs: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+    /// Lines (added, deleted) per path, keyed as [`Git::changes`] keys them.
+    pub fn line_counts(&self, from: &str, side: Side) -> Result<HashMap<String, (u64, u64)>> {
+        // `-` for a binary file, which the filter drops before summing.
+        let count = |s: &str| s.parse().unwrap_or(0);
+        let mut counts = HashMap::new();
+        let mut fields = self.diff("--numstat", from, side)?.into_iter();
+        while let Some(record) = fields.next() {
+            let (added, rest) = record.split_once('\t').context("numstat without a tab")?;
+            let (deleted, path) = rest.split_once('\t').context("numstat without a path")?;
+            // A rename leaves that path empty and follows with its
+            // source and then its destination.
+            let path = if path.is_empty() {
+                fields.nth(1).context("rename without paths")?
+            } else {
+                path.to_owned()
+            };
+            counts.insert(path, (count(added), count(deleted)));
+        }
+        if side == Side::Worktree {
+            // numstat has no row for a file git is not tracking yet.
+            for path in self.untracked()? {
+                let added = std::fs::read(self.root.join(&path))
+                    .map(|c| c.iter().filter(|&&b| b == b'\n').count() as u64)
+                    .unwrap_or(0);
+                counts.entry(path).or_insert((added, 0));
+            }
+        }
+        Ok(counts)
+    }
+
+    pub fn tree_contents(&self, rev: &str, paths: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.blobs(&format!("{rev}:"), paths)
+    }
+
+    pub fn contents(&self, side: Side, paths: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
+        match side {
+            Side::Head => self.blobs("HEAD:", paths),
+            Side::Index => self.blobs(":0:", paths),
+            Side::Worktree => Ok(paths
+                .iter()
+                .map(|p| std::fs::read(self.root.join(p)).ok())
+                .collect()),
+        }
+    }
+
+    /// Bulk-fetch `<prefix><path>`; None per unresolved or non-blob path.
+    fn blobs(&self, prefix: &str, paths: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
         // The batch protocol delimits requests with newlines, so a path
         // containing one would silently resolve wrong objects.
-        if let Some(bad) = specs.iter().find(|s| s.contains('\n')) {
+        if let Some(bad) = paths.iter().find(|p| p.contains('\n')) {
             bail!("path contains a newline, refusing to score: {bad:?}");
         }
         let mut child = Command::new("git")
@@ -166,9 +261,14 @@ impl Git {
             .spawn()
             .context("spawning git cat-file --batch")?;
         let mut stdin = child.stdin.take().expect("piped stdin");
-        let input: Vec<u8> = specs
+        let input: Vec<u8> = paths
             .iter()
-            .flat_map(|s| s.bytes().chain(std::iter::once(b'\n')))
+            .flat_map(|p| {
+                prefix
+                    .bytes()
+                    .chain(p.bytes())
+                    .chain(std::iter::once(b'\n'))
+            })
             .collect();
         let writer = std::thread::spawn(move || stdin.write_all(&input));
         let out = child.wait_with_output()?;
@@ -180,7 +280,7 @@ impl Git {
             bail!("git cat-file --batch failed");
         }
 
-        let mut blobs = Vec::with_capacity(specs.len());
+        let mut blobs = Vec::with_capacity(paths.len());
         let mut rest = out.stdout.as_slice();
         while !rest.is_empty() {
             let nl = rest
@@ -211,11 +311,11 @@ impl Git {
                 .get(size + 1..) // content + trailing newline
                 .context("truncated batch trailer")?;
         }
-        if blobs.len() != specs.len() {
+        if blobs.len() != paths.len() {
             bail!(
-                "cat-file returned {} objects for {} specs",
+                "cat-file returned {} objects for {} paths",
                 blobs.len(),
-                specs.len()
+                paths.len()
             );
         }
         Ok(blobs)

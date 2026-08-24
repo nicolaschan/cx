@@ -8,7 +8,7 @@ use cx_core::{Attribution, Scorer, rescale, run_all};
 use serde::Serialize;
 
 use crate::filter::Filter;
-use crate::git::{Git, Status};
+use crate::git::{Git, Side, Status};
 use crate::progress::Progress;
 
 const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/master"];
@@ -16,7 +16,7 @@ const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/maste
 #[derive(Default)]
 pub struct DiffOptions {
     pub base: Option<String>,
-    pub staged: bool,
+    pub side: Side,
     /// Exclude test files from the universe entirely — they are then in
     /// no reference and no scoring pass, and appear as skipped.
     pub ignore_tests: bool,
@@ -76,6 +76,12 @@ pub struct Skipped {
 pub struct Totals {
     pub review_bytes: u64,
     pub delta_bytes: i64,
+    pub added_lines: u64,
+    pub deleted_lines: u64,
+}
+
+fn lines(content: &[u8]) -> u64 {
+    content.iter().filter(|&&b| b == b'\n').count() as u64
 }
 
 #[derive(Serialize)]
@@ -103,6 +109,7 @@ pub struct AbsOptions {
     pub no_files: bool,
     /// Exclude test files from the universe entirely.
     pub ignore_tests: bool,
+    pub side: Side,
 }
 
 /// One file's contribution to C(tree): its sequential chain-rule score in
@@ -117,7 +124,7 @@ pub struct AbsFile {
 #[derive(Serialize)]
 pub struct AbsReport {
     pub version: VersionInfo,
-    pub rev: String,
+    pub snapshot: &'static str,
     pub file_count: usize,
     pub raw_bytes: u64,
     pub compressed_bytes: u64,
@@ -149,18 +156,15 @@ fn serialize_status<S: serde::Serializer>(status: &Status, s: S) -> Result<S::Ok
 pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffReport> {
     let base = resolve_base(git, opts.base.as_deref())?;
     let merge_base = git.merge_base(&base, "HEAD")?;
-    let changes = git.changes(&merge_base, opts.staged)?;
+    let changes = git.changes(&merge_base, opts.side)?;
 
     // Fetch the whole old tree plus the new side of every change.
     let tree_paths = git.ls_tree(&merge_base)?;
-    let tree_specs: Vec<String> = tree_paths
+    let tree_refs: Vec<&str> = tree_paths.iter().map(String::as_str).collect();
+    let old_tree: HashMap<&str, Vec<u8>> = tree_refs
         .iter()
-        .map(|p| format!("{merge_base}:{p}"))
-        .collect();
-    let old_tree: HashMap<&str, Vec<u8>> = tree_paths
-        .iter()
-        .map(String::as_str)
-        .zip(git.blobs(&tree_specs)?)
+        .copied()
+        .zip(git.tree_contents(&merge_base, &tree_refs)?)
         .filter_map(|(p, b)| Some((p, b?)))
         .collect();
 
@@ -169,20 +173,10 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         .filter(|c| c.status != Status::Deleted)
         .map(|c| c.path.as_str())
         .collect();
-    let new_specs: Vec<String> = new_side_paths
-        .iter()
-        .map(|p| {
-            if opts.staged {
-                format!(":0:{p}")
-            } else {
-                format!("HEAD:{p}")
-            }
-        })
-        .collect();
     let new_contents: HashMap<&str, Vec<u8>> = new_side_paths
         .iter()
         .copied()
-        .zip(git.blobs(&new_specs)?)
+        .zip(git.contents(opts.side, &new_side_paths)?)
         .filter_map(|(p, b)| Some((p, b?)))
         .collect();
 
@@ -302,11 +296,7 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         } else {
             0.0
         };
-        let new_lines = item
-            .new
-            .as_ref()
-            .map(|c| c.iter().filter(|&&b| b == b'\n').count() as u64)
-            .unwrap_or(0);
+        let new_lines = item.new.as_deref().map_or(0, lines);
         files.push(DiffFile {
             path: item.path.clone(),
             status: item.status.clone(),
@@ -322,6 +312,12 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
     flag_density_outliers(&mut files);
     files.sort_by(|a, b| b.review_bytes.total_cmp(&a.review_bytes));
 
+    let churn = git.line_counts(&merge_base, opts.side)?;
+    let (added_lines, deleted_lines) = items
+        .iter()
+        .filter_map(|item| churn.get(&item.path))
+        .fold((0, 0), |(a, d), (added, deleted)| (a + added, d + deleted));
+
     Ok(DiffReport {
         version: VersionInfo::for_scorer(&scorer),
         base,
@@ -331,6 +327,8 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         totals: Totals {
             review_bytes: review.joint,
             delta_bytes: delta_new.joint as i64 - delta_old.joint as i64,
+            added_lines,
+            deleted_lines,
         },
         scales: Scales {
             review: review.scale,
@@ -341,12 +339,12 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
 }
 
 pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport> {
-    let rev = "HEAD".to_owned();
-    let paths = git.ls_tree(&rev)?;
-    let specs: Vec<String> = paths.iter().map(|p| format!("{rev}:{p}")).collect();
+    let paths = git.list(opts.side)?;
+    let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     let contents: Vec<(String, Vec<u8>)> = paths
-        .into_iter()
-        .zip(git.blobs(&specs)?)
+        .iter()
+        .cloned()
+        .zip(git.contents(opts.side, &path_refs)?)
         .filter_map(|(p, b)| Some((p, b?)))
         .collect();
     let attr_paths: Vec<String> = contents.iter().map(|(p, _)| p.clone()).collect();
@@ -376,14 +374,14 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
         .map(|((path, content), score)| AbsFile {
             path: (*path).clone(),
             bytes: score.rescaled,
-            lines: content.iter().filter(|&&b| b == b'\n').count() as u64,
+            lines: lines(content),
         })
         .collect();
     files.sort_by(|a, b| b.bytes.total_cmp(&a.bytes));
 
     Ok(AbsReport {
         version: VersionInfo::for_scorer(&scorer),
-        rev,
+        snapshot: opts.side.label(),
         file_count: kept.len(),
         raw_bytes: kept_contents.iter().map(|c| c.len() as u64).sum(),
         compressed_bytes: scored.joint,

@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use cx_cli::git::{Git, Status};
+use cx_cli::git::{Git, Side, Status};
 use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
 use cx_cli::progress::Progress;
 
@@ -65,7 +65,15 @@ fn setup() -> (tempfile::TempDir, Git) {
 #[test]
 fn scores_a_realistic_branch() {
     let (_dir, git) = setup();
-    let report = pipeline::diff(&git, &DiffOptions::default(), Progress::hidden()).unwrap();
+    let report = pipeline::diff(
+        &git,
+        &DiffOptions {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::hidden(),
+    )
+    .unwrap();
 
     let by_path = |p: &str| {
         report
@@ -122,6 +130,35 @@ fn scores_a_realistic_branch() {
             "implausible scale factor {scale}"
         );
     }
+}
+
+/// Line churn, counted as git counts it: the fixture adds novel.rs and
+/// novel_test.rs (120 lines each) and deletes gone.rs (120), while the
+/// rename of mover.rs and the skipped lockfile and binary count for
+/// nothing.
+#[test]
+fn line_churn_counts_what_git_counts() {
+    let (_dir, git) = setup();
+    let report = pipeline::diff(&git, &DiffOptions::default(), Progress::hidden()).unwrap();
+    assert_eq!(
+        (report.totals.added_lines, report.totals.deleted_lines),
+        (240, 120)
+    );
+
+    // Excluding the test file drops exactly its lines, no others.
+    let without = pipeline::diff(
+        &git,
+        &DiffOptions {
+            ignore_tests: true,
+            ..Default::default()
+        },
+        Progress::hidden(),
+    )
+    .unwrap();
+    assert_eq!(
+        (without.totals.added_lines, without.totals.deleted_lines),
+        (120, 120)
+    );
 }
 
 /// What excluding tests must and must not do to the numbers. That the
@@ -223,7 +260,7 @@ fn staged_mode_scores_the_index() {
     let report = pipeline::diff(
         &git,
         &DiffOptions {
-            staged: true,
+            side: Side::Index,
             ..Default::default()
         },
         Progress::hidden(),
@@ -239,7 +276,15 @@ fn staged_mode_scores_the_index() {
 #[test]
 fn tree_reports_absolute_complexity_with_contributions() {
     let (_dir, git) = setup();
-    let report = pipeline::abs(&git, &AbsOptions::default(), Progress::hidden()).unwrap();
+    let report = pipeline::abs(
+        &git,
+        &AbsOptions {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::hidden(),
+    )
+    .unwrap();
     // keep.rs + moved.rs + novel.rs + tests/novel_test.rs;
     // Cargo.lock and logo.png excluded.
     assert_eq!(report.file_count, 4, "kept files at HEAD");
@@ -267,6 +312,7 @@ fn tree_contributions_are_suppressable() {
         &git,
         &AbsOptions {
             no_files: true,
+            side: Side::Head,
             ..Default::default()
         },
         Progress::hidden(),
@@ -275,4 +321,208 @@ fn tree_contributions_are_suppressable() {
     assert_eq!(report.file_count, 4);
     assert!(report.files.is_empty());
     assert_eq!(report.scale, 1.0);
+}
+
+#[test]
+fn worktree_side_scores_the_whole_working_tree() {
+    let (dir, repo) = setup();
+    let root = dir.path();
+    // One of each kind of dirt on top of the feature branch.
+    fs::write(root.join("src/staged.rs"), gen_code(123, 80)).unwrap();
+    git(root, &["add", "src/staged.rs"]);
+    fs::write(root.join("src/keep.rs"), gen_code(200, 80)).unwrap();
+    fs::write(root.join("src/untracked.rs"), gen_code(77, 80)).unwrap();
+    // Excluded without touching a tracked .gitignore, which would itself
+    // show up as a change.
+    fs::write(root.join(".git/info/exclude"), "ignored.rs\n").unwrap();
+    fs::write(root.join("ignored.rs"), gen_code(55, 80)).unwrap();
+
+    let report = pipeline::diff(
+        &repo,
+        &DiffOptions {
+            side: Side::Worktree,
+            ..Default::default()
+        },
+        Progress::hidden(),
+    )
+    .unwrap();
+    let scored = |p: &str| report.files.iter().find(|f| f.path == p);
+
+    for path in ["src/staged.rs", "src/keep.rs", "src/untracked.rs"] {
+        assert!(
+            scored(path).is_some_and(|f| f.review_bytes > 300.0),
+            "{path} must be scored: {:?}",
+            report.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(scored("src/untracked.rs").unwrap().status, Status::Added);
+    assert_eq!(scored("src/keep.rs").unwrap().status, Status::Modified);
+    assert!(
+        scored("ignored.rs").is_none(),
+        "an ignored file is not part of the working tree's changes"
+    );
+
+    // The unstaged and untracked halves are exactly what --staged misses.
+    let staged_only = pipeline::diff(
+        &repo,
+        &DiffOptions {
+            side: Side::Index,
+            ..Default::default()
+        },
+        Progress::hidden(),
+    )
+    .unwrap();
+    let staged_paths: Vec<&str> = staged_only.files.iter().map(|f| f.path.as_str()).collect();
+    assert!(staged_paths.contains(&"src/staged.rs"));
+    assert!(!staged_paths.contains(&"src/keep.rs"));
+    assert!(!staged_paths.contains(&"src/untracked.rs"));
+}
+
+#[test]
+fn abs_measures_the_snapshot_it_is_asked_for() {
+    let (dir, repo) = setup();
+    let root = dir.path();
+    fs::write(root.join("src/staged.rs"), gen_code(123, 80)).unwrap();
+    git(root, &["add", "src/staged.rs"]);
+    fs::write(root.join("src/untracked.rs"), gen_code(77, 80)).unwrap();
+    // Tracked at HEAD and in the index, but no longer on disk.
+    fs::remove_file(root.join("src/keep.rs")).unwrap();
+    fs::write(root.join(".git/info/exclude"), "ignored.rs\n").unwrap();
+    fs::write(root.join("ignored.rs"), gen_code(55, 80)).unwrap();
+
+    let measure = |side| {
+        let report = pipeline::abs(
+            &repo,
+            &AbsOptions {
+                side,
+                ..Default::default()
+            },
+            Progress::hidden(),
+        )
+        .unwrap();
+        let mut paths: Vec<String> = report.files.iter().map(|f| f.path.clone()).collect();
+        paths.sort();
+        assert_eq!(report.file_count, paths.len(), "{side:?}");
+        (paths, report.snapshot)
+    };
+
+    assert_eq!(
+        measure(Side::Head),
+        (
+            vec![
+                "src/keep.rs".to_owned(),
+                "src/moved.rs".to_owned(),
+                "src/novel.rs".to_owned(),
+                "tests/novel_test.rs".to_owned()
+            ],
+            "HEAD"
+        )
+    );
+    assert_eq!(
+        measure(Side::Index),
+        (
+            vec![
+                "src/keep.rs".to_owned(),
+                "src/moved.rs".to_owned(),
+                "src/novel.rs".to_owned(),
+                "src/staged.rs".to_owned(),
+                "tests/novel_test.rs".to_owned()
+            ],
+            "index"
+        )
+    );
+    // keep.rs is gone from disk; untracked.rs is there without being
+    // tracked; ignored.rs is on disk but excluded.
+    assert_eq!(
+        measure(Side::Worktree),
+        (
+            vec![
+                "src/moved.rs".to_owned(),
+                "src/novel.rs".to_owned(),
+                "src/staged.rs".to_owned(),
+                "src/untracked.rs".to_owned(),
+                "tests/novel_test.rs".to_owned()
+            ],
+            "worktree"
+        )
+    );
+}
+
+/// `git ls-files --cached` reports an unmerged path once per conflict
+/// stage, so scoring it verbatim would count the file three times.
+#[test]
+fn an_unmerged_path_is_scored_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/f.rs"), gen_code(1, 120)).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "other"]);
+    fs::write(root.join("src/f.rs"), gen_code(2, 120)).unwrap();
+    git(root, &["commit", "-q", "-am", "other"]);
+    git(root, &["checkout", "-q", "main"]);
+    fs::write(root.join("src/f.rs"), gen_code(3, 120)).unwrap();
+    git(root, &["commit", "-q", "-am", "mine"]);
+    // Expected to fail: it leaves src/f.rs unmerged, which is the point.
+    let merge = Command::new("git")
+        .current_dir(root)
+        .args(["merge", "other"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the merge must conflict");
+
+    let repo = Git::discover_at(root).unwrap();
+    let report = pipeline::abs(
+        &repo,
+        &AbsOptions {
+            side: Side::Worktree,
+            ..Default::default()
+        },
+        Progress::hidden(),
+    )
+    .unwrap();
+    assert_eq!(
+        report.file_count, 1,
+        "src/f.rs is one file, not one per stage"
+    );
+}
+
+/// `git diff --numstat` has no row for a file git isn't tracking yet, so
+/// the churn totals have to account for untracked files separately.
+#[test]
+fn untracked_lines_reach_the_churn_totals() {
+    let (dir, repo) = setup();
+    let root = dir.path();
+    let committed = pipeline::diff(
+        &repo,
+        &DiffOptions {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::hidden(),
+    )
+    .unwrap();
+
+    fs::write(root.join("src/fresh.rs"), gen_code(77, 40)).unwrap();
+    let worktree = pipeline::diff(
+        &repo,
+        &DiffOptions {
+            side: Side::Worktree,
+            ..Default::default()
+        },
+        Progress::hidden(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        worktree.totals.added_lines,
+        committed.totals.added_lines + 40,
+        "the untracked file's 40 lines must be counted"
+    );
+    assert_eq!(
+        worktree.totals.deleted_lines,
+        committed.totals.deleted_lines
+    );
 }
