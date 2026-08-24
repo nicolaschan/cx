@@ -245,8 +245,16 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
 
     // The three passes (plan §3): metric 1 against the full old tree,
     // metric 2 as new-vs-old against the neutral remainder.
-    let new_items: Vec<&[u8]> = items.iter().filter_map(|i| i.new.as_deref()).collect();
-    let old_items: Vec<&[u8]> = items.iter().filter_map(|i| i.old.as_deref()).collect();
+    // A missing side is the empty file, which scores 0, so every pass is
+    // indexed like `items`.
+    let new_items: Vec<&[u8]> = items
+        .iter()
+        .map(|i| i.new.as_deref().unwrap_or_default())
+        .collect();
+    let old_items: Vec<&[u8]> = items
+        .iter()
+        .map(|i| i.old.as_deref().unwrap_or_default())
+        .collect();
     let passes = [
         scorer.attribution(&tree, &new_items),
         scorer.attribution(&remainder, &new_items),
@@ -261,31 +269,16 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
     });
 
     let mut files = Vec::with_capacity(items.len());
-    let (mut new_i, mut old_i) = (0, 0);
-    for item in &items {
-        let (review_bytes, new_delta) = if item.new.is_some() {
-            let scored = (review[new_i], delta_new[new_i] as i64);
-            new_i += 1;
-            scored
-        } else {
-            (0, 0)
-        };
-        let old_delta = if item.old.is_some() {
-            let d = delta_old[old_i] as i64;
-            old_i += 1;
-            d
-        } else {
-            0
-        };
-        let new_lines = item.new.as_deref().map_or(0, lines);
+    for (i, item) in items.iter().enumerate() {
+        let new_lines = lines(new_items[i]);
         files.push(DiffFile {
             path: item.path.clone(),
             status: item.status.clone(),
-            review_bytes,
-            delta_bytes: new_delta - old_delta,
+            review_bytes: review[i],
+            delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
             new_lines,
             bytes_per_line: (item.status == Status::Added && new_lines > 0)
-                .then(|| review_bytes as f64 / new_lines as f64),
+                .then(|| review[i] as f64 / new_lines as f64),
             density_outlier: false,
         });
     }

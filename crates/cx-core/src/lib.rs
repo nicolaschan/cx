@@ -55,7 +55,7 @@ impl Scorer {
 
     /// C(input | reference).
     pub fn score(&self, reference: &[&[u8]], input: &[u8]) -> u64 {
-        self.attribution(reference, &[input]).run(&|_| {})[0]
+        self.attribution(reference, &[input]).run(|_| {})[0]
     }
 
     pub fn attribution<'a>(
@@ -101,20 +101,18 @@ impl Attribution<'_> {
 
     /// Each item's score; `progress` receives each part's length as it
     /// finishes, reference parts included.
-    pub fn run(&self, progress: &(dyn Fn(u64) + Sync)) -> Vec<u64> {
+    pub fn run(&self, progress: impl Fn(u64)) -> Vec<u64> {
         let mut cctx = CCtx::create();
-        let set = |cctx: &mut CCtx, p| {
-            cctx.set_parameter(p).expect("static zstd parameter");
-        };
-        set(&mut cctx, CParameter::CompressionLevel(self.scorer.level));
-        // Determinism by construction, not by libzstd's default: MT zstd
-        // changes output sizes.
-        set(&mut cctx, CParameter::NbWorkers(0));
-        set(&mut cctx, CParameter::EnableLongDistanceMatching(true));
-        set(
-            &mut cctx,
+        for p in [
+            CParameter::CompressionLevel(self.scorer.level),
+            // Determinism by construction, not by libzstd's default: MT zstd
+            // changes output sizes.
+            CParameter::NbWorkers(0),
+            CParameter::EnableLongDistanceMatching(true),
             CParameter::WindowLog(self.scorer.window_log(self.bytes())),
-        );
+        ] {
+            cctx.set_parameter(p).expect("static zstd parameter");
+        }
 
         let mut out: Vec<u8> = Vec::new();
         let mut feed = |part: &[u8]| -> u64 {
