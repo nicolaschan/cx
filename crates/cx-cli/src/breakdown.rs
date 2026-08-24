@@ -1,13 +1,5 @@
-//! dust-style hierarchical breakdown: aggregate per-file scores up the
-//! directory tree, keep only the globally biggest nodes, elide the rest
-//! per directory. Display-side only — the JSON contract stays the full
-//! flat file list. (dust's own renderer lives inside its binary, not a
-//! library; this mirrors the approach rather than importing it.)
-
 use std::collections::BTreeMap;
 
-/// One path's inputs. `delta` is `Some` only for paths the diff touched;
-/// `marker` is the file's status indicator ("+", "−", "→ …").
 pub struct Entry<'a> {
     pub path: &'a str,
     pub bytes: f64,
@@ -23,9 +15,7 @@ pub struct Node {
     pub delta: Option<f64>,
     pub marker: Option<String>,
     pub is_dir: bool,
-    /// Sorted by bytes descending.
     pub children: Vec<Node>,
-    /// Summary of this directory's pruned children, if any.
     pub elided: Option<Elided>,
 }
 
@@ -35,11 +25,6 @@ pub struct Elided {
     pub delta: Option<f64>,
 }
 
-/// Build the aggregated tree, pruned to (roughly) the `top` biggest
-/// nodes. A directory's bytes are the sum of its children's, so any kept
-/// node's ancestors are at least as big and also kept — the tree stays
-/// connected by construction. Ties at the threshold keep slightly more
-/// than `top` rather than dropping arbitrarily.
 pub fn breakdown<'a>(entries: impl IntoIterator<Item = Entry<'a>>, top: usize) -> Node {
     let mut root = Builder::default();
     for entry in entries {

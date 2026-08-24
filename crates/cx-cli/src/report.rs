@@ -1,7 +1,3 @@
-//! Human-readable rendering via comfy-table: the layout and the tables'
-//! styling come from the library. The JSON form is serde on the report
-//! structs — that serialization is the contract tooling consumes.
-
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table, presets};
 use crossterm::style::{ResetColor, SetForegroundColor};
 
@@ -9,24 +5,16 @@ use crate::breakdown::{self, Entry, Node};
 use crate::git::Status;
 use crate::pipeline::{AbsReport, DiffFile, DiffReport, VersionInfo};
 
-/// What a view includes, and whether it may say it in color — an input,
-/// not something the renderer reads off the process it runs in, so the
-/// same report renders the same bytes wherever it runs.
 #[derive(Clone, Copy)]
 pub struct Options {
-    /// Only the N biggest files/directories in the breakdown.
     pub top: usize,
     pub files: bool,
-    /// The footer's detail lines.
     pub verbose: bool,
-    /// Tables and footer alike: a run colors everything or nothing.
     pub color: bool,
 }
 
 impl Options {
-    /// Colors are the `comfy_table::Color` the table cells use (the
-    /// crate re-exports crossterm's type), so a value means the same
-    /// thing above and below the table.
+    // comfy_table::Color is crossterm's (feature reexport_crossterm), so one value colors cells and footer alike.
     fn paint(self, text: impl std::fmt::Display, color: Option<Color>) -> String {
         match color.filter(|_| self.color) {
             Some(c) => format!("{}{text}{}", SetForegroundColor(c), ResetColor),
@@ -34,20 +22,15 @@ impl Options {
         }
     }
 
-    /// Incidental metadata: present, never competing with the numbers.
     fn dim(self, text: impl std::fmt::Display) -> String {
         self.paint(text, Some(Color::DarkGrey))
     }
 
-    /// A `label value` pair: the label dim, the value carrying the color.
     fn stat(self, label: &str, value: String, color: Option<Color>) -> String {
         format!("{} {}", self.dim(label), self.paint(value, color))
     }
 }
 
-/// An [`Entry`] for one path, with the diff columns (ΔC + marker) filled
-/// from its change when it has one. The single construction point for
-/// every view.
 fn entry<'a>(path: &'a str, bytes: f64, lines: u64, change: Option<&DiffFile>) -> Entry<'a> {
     Entry {
         path,
@@ -58,8 +41,6 @@ fn entry<'a>(path: &'a str, bytes: f64, lines: u64, change: Option<&DiffFile>) -
     }
 }
 
-/// Diff-status indicator: "+" added, "−" deleted, "→ <from>" renamed,
-/// "⚠" appended for density outliers.
 fn status_marker(file: &DiffFile) -> Option<String> {
     let base = match &file.status {
         Status::Added => Some("+".to_owned()),
@@ -74,7 +55,6 @@ fn status_marker(file: &DiffFile) -> Option<String> {
     }
 }
 
-/// Diff-status colors follow the universal diff convention.
 fn marker_color(marker: &str) -> Option<Color> {
     match marker.chars().next() {
         _ if marker.contains('⚠') => Some(Color::Yellow),
@@ -85,8 +65,6 @@ fn marker_color(marker: &str) -> Option<Color> {
     }
 }
 
-/// Magnitude coloring shared by both metrics: tiny scores fade, big ones
-/// warn. Negative deltas (removed complexity) are the one good color.
 fn score_color(bytes: f64) -> Option<Color> {
     if bytes.abs() < 64.0 {
         Some(Color::DarkGrey)
@@ -112,8 +90,6 @@ fn num_cell(text: String, color: Option<Color>) -> Cell {
     colored(Cell::new(text).set_alignment(CellAlignment::Right), color)
 }
 
-/// One rendered line of the dust-style breakdown. Elision-summary rows
-/// (`dim`) render entirely gray.
 struct Row {
     bytes: f64,
     delta: Option<f64>,
@@ -163,8 +139,6 @@ impl Row {
     }
 }
 
-/// Emit a node's children as rows, biggest first within each directory,
-/// with an elision summary last where pruning bit.
 fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, show_delta: bool) {
     let child_count = node.children.len() + usize::from(node.elided.is_some());
     for (i, child) in node.children.iter().enumerate() {
@@ -202,10 +176,6 @@ fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, show_
     }
 }
 
-/// A view: `footer`, under the dust-style breakdown of `entries` where
-/// there is one. `diff_columns` names the size column ("BYTES" for tree
-/// contributions, "REVIEW" for diff cost) and adds the ΔC + status
-/// columns; `None` renders the plain tree view.
 fn view<'a>(
     entries: impl IntoIterator<Item = Entry<'a>>,
     total: f64,
@@ -237,9 +207,6 @@ fn view<'a>(
     format!("{table}\n\n{footer}")
 }
 
-/// Everything under the table: one summary line, plus the details
-/// `--verbose` adds. Every view folds in here, so what they share is
-/// written once.
 fn footer(
     opts: Options,
     version: &VersionInfo,
@@ -249,8 +216,6 @@ fn footer(
     let mut summary = Vec::new();
     let mut details = Vec::new();
     if let Some(abs) = abs {
-        // C(tree) is a whole-repo absolute, not a change: no magnitude
-        // color (it would sit permanently red).
         summary.push(opts.stat("C(tree)", fmt_bytes(abs.compressed_bytes as f64), None));
         details.push(opts.dim(format!(
             "C(tree) over {} files ({} raw)",
@@ -259,8 +224,6 @@ fn footer(
         )));
     }
     if let Some(diff) = diff {
-        // The totals carry the same magnitude coloring as the cells they
-        // sum, so a red total and a red row mean one thing.
         let review = diff.totals.review_bytes as f64;
         let delta = diff.totals.delta_bytes as f64;
         if diff.files.is_empty() && diff.skipped.is_empty() {
@@ -268,14 +231,10 @@ fn footer(
         } else {
             summary.push(opts.stat("review", fmt_bytes(review), score_color(review)));
             summary.push(opts.stat("ΔC", fmt_signed(delta), score_color(delta)));
-            // The familiar size ΔC is read against, not a verdict of its
-            // own, so it stays uncolored.
             let (added, deleted) = (diff.totals.added_lines, diff.totals.deleted_lines);
             summary.push(opts.stat("lines", format!("+{added} −{deleted}"), None));
         }
         if !diff.skipped.is_empty() {
-            // The count stays on the summary line: it says the totals
-            // beside it do not cover everything that changed.
             summary.push(opts.dim(format!("{} skipped", diff.skipped.len())));
             let list: Vec<String> = diff
                 .skipped
@@ -290,8 +249,6 @@ fn footer(
         details.push(format!(
             "{}   {}",
             scale_gauge(opts, abs, diff),
-            // Provenance: the scores mean nothing without it, but it
-            // never changes run to run — dim.
             opts.dim(format!(
                 "zstd {}, level {}, window≤2^{}",
                 version.zstd, version.level, version.max_window_log
@@ -302,9 +259,6 @@ fn footer(
     lines.iter().map(|line| format!(" {line}\n")).collect()
 }
 
-/// The attribution noise gauge, colored by whether per-item numbers can
-/// be trusted at all. It reports the worst of every pass the view
-/// merged: one bad pass makes every per-item number in it suspect.
 fn scale_gauge(opts: Options, abs: Option<&AbsReport>, diff: Option<&DiffReport>) -> String {
     let scales = diff
         .into_iter()
@@ -335,8 +289,6 @@ fn scale_gauge(opts: Options, abs: Option<&AbsReport>, diff: Option<&DiffReport>
     )
 }
 
-/// The diff view: same dust-style renderer as the overview, but only the
-/// diff's files — sized by REVIEW cost, with ΔC and status markers.
 pub fn render_diff(report: &DiffReport, opts: Options) -> String {
     let total = report.totals.review_bytes.max(1) as f64;
     let entries = report
@@ -352,9 +304,6 @@ pub fn render_diff(report: &DiffReport, opts: Options) -> String {
     )
 }
 
-/// The default view: one table merging the tree breakdown with the
-/// diff's ΔC per touched path. Deleted files have no tree bytes but
-/// their refunds still aggregate into their directory's ΔC.
 pub fn render_overview(abs: &AbsReport, diff: &DiffReport, opts: Options) -> String {
     let mut changed: std::collections::HashMap<&str, &DiffFile> =
         diff.files.iter().map(|f| (f.path.as_str(), f)).collect();
