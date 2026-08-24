@@ -5,4 +5,5 @@ pub mod language;
 pub mod pipeline;
 pub mod progress;
 pub mod report;
+pub mod scope;
 pub mod strip;

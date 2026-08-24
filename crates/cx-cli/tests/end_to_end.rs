@@ -761,3 +761,128 @@ fn prose_is_skipped_by_default_and_scored_on_request() {
         assert!(!skipped_as_prose(&report));
     }
 }
+
+/// A one-commit repo holding exactly these files.
+fn repo_with(files: &[(&str, Vec<u8>)]) -> (tempfile::TempDir, Git) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    for (path, contents) in files {
+        let full = root.join(path);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, contents).unwrap();
+    }
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    let repo = Git::discover_at(root).unwrap();
+    (dir, repo)
+}
+
+/// What `--glob` promises: the selection is scored *as if it were the
+/// whole repository*. Not the same files filtered out of a larger answer
+/// — the same numbers, which only holds because the out-of-scope files
+/// are absent from the reference too. Scoring `alpha/` inside a repo that
+/// also holds `beta/` must equal scoring a repo that only ever had
+/// `alpha/`.
+#[test]
+fn a_scoped_run_equals_a_repo_holding_only_that_scope() {
+    let alpha = [
+        ("alpha/a.rs", gen_code(1, 120)),
+        ("alpha/b.rs", gen_code(2, 120)),
+    ];
+    let (_whole_dir, whole) = repo_with(&[
+        alpha[0].clone(),
+        alpha[1].clone(),
+        ("beta/c.rs", gen_code(3, 120)),
+        ("beta/d.rs", gen_code(4, 120)),
+    ]);
+    let (_alone_dir, alone) = repo_with(&alpha);
+
+    let scoped = pipeline::abs(
+        &whole,
+        &AbsOptions {
+            globs: vec!["alpha/**".to_owned()],
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+    let unscoped = pipeline::abs(&alone, &AbsOptions::default(), Progress::default()).unwrap();
+
+    let scores = |r: &pipeline::AbsReport| -> Vec<(String, u64)> {
+        r.files.iter().map(|f| (f.path.clone(), f.bytes)).collect()
+    };
+    assert_eq!(scores(&scoped), scores(&unscoped));
+    assert_eq!(scoped.compressed_bytes, unscoped.compressed_bytes);
+    assert_eq!(scoped.file_count, 2);
+}
+
+/// Out of scope is *absent*, not *skipped*. The skipped list names files
+/// cx looked at and declined to score; cx never looked at these, and on a
+/// large repo listing them would bury the ones that matter.
+#[test]
+fn out_of_scope_files_are_neither_scored_nor_skipped() {
+    let (_dir, git) = setup();
+    let report = pipeline::diff(
+        &git,
+        &DiffOptions {
+            side: Side::Head,
+            globs: vec!["src/**".to_owned()],
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+
+    let named: Vec<&str> = report
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .chain(report.skipped.iter().map(|s| s.path.as_str()))
+        .collect();
+    assert!(
+        report.files.iter().any(|f| f.path == "src/novel.rs"),
+        "the scope's own files must still be scored"
+    );
+    // Unscoped, each of these is in the report: the lockfile and the
+    // binary as skipped, the test as skipped by naming convention.
+    for path in ["Cargo.lock", "logo.png", "tests/novel_test.rs"] {
+        assert!(
+            !named.contains(&path),
+            "{path} must be out of the run: {named:?}"
+        );
+    }
+}
+
+/// A `!` glob subtracts, and subtracts only what it names.
+#[test]
+fn an_excluding_glob_drops_just_its_matches() {
+    let (_dir, git) = setup();
+    let run = |globs: Vec<String>| {
+        pipeline::diff(
+            &git,
+            &DiffOptions {
+                side: Side::Head,
+                globs,
+                ..Default::default()
+            },
+            Progress::default(),
+        )
+        .unwrap()
+    };
+    let paths = |r: &pipeline::DiffReport| -> Vec<String> {
+        let mut p: Vec<String> = r.files.iter().map(|f| f.path.clone()).collect();
+        p.sort();
+        p
+    };
+
+    let all = run(vec![]);
+    let without = run(vec!["!src/novel.rs".to_owned()]);
+    assert!(paths(&all).contains(&"src/novel.rs".to_owned()));
+
+    let expected: Vec<String> = paths(&all)
+        .into_iter()
+        .filter(|p| p != "src/novel.rs")
+        .collect();
+    assert_eq!(paths(&without), expected);
+}

@@ -53,7 +53,7 @@ cx diff  [-n <N>] [--base <ref>]  # just the diff, sized by review cost
 cx abs   [-n <N>]                 # absolute C(tree): the trend-line number
 
 # any of the above: [--staged|--committed] [-v|--verbose] [--no-files]
-#                   [--comments] [--prose] [--include-tests] [--json]
+#                   [-g <glob>] [--comments] [--prose] [--include-tests] [--json]
 ```
 
 Every view scores the **working tree** by default — staged and unstaged
@@ -62,10 +62,37 @@ index; `--committed` scores HEAD. `abs` takes the same choice — `C(tree)`
 and `ΔCX` describe the same snapshot.
 
 Defaults can be pinned through the environment — `CX_COMMENTS=1`,
-`CX_PROSE=1`, `CX_INCLUDE_TESTS=1`, `CX_TOP=15`, `CX_BASE=develop` — and
-any single run can still override them on the command line
-(`--comments=false`, `-n 50`). `cx --help` lists which variable backs
-each flag.
+`CX_PROSE=1`, `CX_INCLUDE_TESTS=1`, `CX_TOP=15`, `CX_BASE=develop`,
+`CX_GLOB='src/**'` — and any single run can still override them on the
+command line (`--comments=false`, `-n 50`). `cx --help` lists which
+variable backs each flag.
+
+## Scoping to part of a repo
+
+`-g/--glob` restricts a run to the paths it selects — gitignore syntax,
+`!` to exclude, repeatable, and among globs the last match wins. Same
+spelling as ripgrep's `-g` and as a `.cxignore` line, because it is the
+same matcher underneath.
+
+```console
+$ cx abs -g 'crates/cx-cli/**'          # size one subsystem
+$ cx -g '!**/generated/**'              # leave a directory out of the diff
+$ cx abs -g 'src/**' -g '!src/legacy/**'
+```
+
+What the globs select is scored **as if it were the whole repository**: a
+path outside the scope is in no reference and no scoring pass, and does
+not appear in the skipped list either — cx never looked at it. So
+`cx abs -g 'crates/api/**'` gives that subtree's own `C(tree)`, the same
+number a repo containing only `crates/api` would report, and on a large
+repository cx never fetches the rest. Subtree scores do not add up to the
+whole: the repo-wide number charges shared patterns once, which is the
+point of the metric.
+
+Directories work as they do in gitignore. `-g '!target'` prunes that
+subtree without a `target/**`, and — as in gitignore — nothing inside an
+excluded directory can be added back, so carve out with a narrower
+exclude (`-g '!vendor/lib/**'`) rather than excluding the parent.
 
 The tree breakdown is dust-style: contributions aggregate up the
 directory tree, only the `-n` globally biggest files/directories are

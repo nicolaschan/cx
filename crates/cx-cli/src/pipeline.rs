@@ -11,6 +11,7 @@ use serde::Serialize;
 use crate::filter::Filter;
 use crate::git::{Git, Side, Status};
 use crate::progress::Progress;
+use crate::scope::Scope;
 use crate::strip;
 
 const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/master"];
@@ -28,6 +29,9 @@ pub struct DiffOptions {
     /// Score prose files (Markdown, reStructuredText, …) too. Otherwise
     /// they are skipped, like tests.
     pub prose: bool,
+    /// Restrict the run to the paths these globs select — see [`Scope`].
+    /// Empty is the whole repository.
+    pub globs: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -145,6 +149,9 @@ pub struct AbsOptions {
     /// Score prose files too; otherwise they are skipped.
     pub prose: bool,
     pub side: Side,
+    /// Restrict the run to the paths these globs select — see [`Scope`].
+    /// Empty is the whole repository.
+    pub globs: Vec<String>,
 }
 
 /// One file's contribution to C(tree): its sequential chain-rule score in
@@ -188,9 +195,14 @@ fn serialize_status<S: serde::Serializer>(status: &Status, s: S) -> Result<S::Ok
 pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffReport> {
     let base = resolve_base(git, opts.base.as_deref())?;
     let merge_base = git.merge_base(&base, "HEAD")?;
-    let changes = git.changes(&merge_base, opts.side)?;
-
-    let tree_paths = git.ls_tree(&merge_base)?;
+    // Scoping happens on the raw listings, before a blob is fetched: an
+    // out-of-scope path is not in the reference, not scored, and not
+    // skipped — it is simply not part of this run's repository.
+    let scope = Scope::new(git.root(), &opts.globs)?;
+    let mut changes = git.changes(&merge_base, opts.side)?;
+    changes.retain(|c| scope.allows(&c.path));
+    let mut tree_paths = git.ls_tree(&merge_base)?;
+    tree_paths.retain(|p| scope.allows(p));
     let tree_refs: Vec<&str> = tree_paths.iter().map(String::as_str).collect();
     let new_side_paths: Vec<&str> = changes
         .iter()
@@ -344,7 +356,11 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
 }
 
 pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport> {
-    let paths = git.list(opts.side)?;
+    // Scoped before the blobs are fetched: out of scope is out of the
+    // repository, as far as this run is concerned.
+    let scope = Scope::new(git.root(), &opts.globs)?;
+    let mut paths = git.list(opts.side)?;
+    paths.retain(|p| scope.allows(p));
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     let blobs = git.contents(opts.side, &path_refs)?;
     let attr_paths: Vec<String> = path_refs
