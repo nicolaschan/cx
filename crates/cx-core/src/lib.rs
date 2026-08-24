@@ -116,7 +116,7 @@ impl Scorer {
             max_window_log,
             empty_frame: 0,
         };
-        scorer.empty_frame = scorer.compress(&mut CCtx::create(), &[], &[]);
+        scorer.empty_frame = scorer.score(&[], &[]);
         scorer
     }
 
@@ -138,9 +138,7 @@ impl Scorer {
     }
 
     pub fn attribution<'s>(&'s self, reference: &[u8], items: &[&[u8]]) -> Attribution<'s> {
-        let grown: usize = items.iter().map(|i| i.len() + SEPARATOR.len()).sum();
-        let mut buffer = Vec::with_capacity(reference.len() + grown);
-        buffer.extend_from_slice(reference);
+        let mut buffer = reference.to_vec();
         let mut inputs: Vec<Range<usize>> = items
             .iter()
             .map(|item| {
@@ -198,9 +196,9 @@ impl Scorer {
 
 /// The independent compressions behind attributing `items` to
 /// `reference`, over one buffer `reference ++ item₀ ++ SEP ++ item₁ …`:
-/// C(item_i | reference ++ items[..i]) for each item — sequential
-/// chain-rule scoring, so a pattern repeated across items is charged
-/// to its first occurrence and near-free afterwards — and last,
+/// C(item_i | reference ++ items[..i]) for each item — the chain rule,
+/// so a pattern repeated across items is charged to its first
+/// occurrence and near-free afterwards — and last,
 /// C(all items jointly | reference), the rescale target.
 pub struct Attribution<'s> {
     scorer: &'s Scorer,

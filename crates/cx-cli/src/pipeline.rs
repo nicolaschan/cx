@@ -362,9 +362,6 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
         .collect();
     let kept_contents: Vec<&[u8]> = kept.iter().map(|(_, c)| *c).collect();
 
-    // Per-file contribution: the chain rule over sorted paths against an
-    // empty reference — the same attribution machinery as diff scoring,
-    // with C(tree) itself as the rescale target.
     let scorer = Scorer::default();
     let scored = if opts.no_files {
         let _spinner = progress.spinner("C(tree)");
