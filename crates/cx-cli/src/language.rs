@@ -15,13 +15,27 @@ use tokei::{Config, LanguageType};
 /// the CString step, before any lookup touches disk.)
 const NOWHERE: &str = "/\0";
 
-/// How an interpreter names itself in a shebang versus the extension of
-/// the files it runs, where the two differ.
-const INTERPRETERS: [(&str, &str); 4] = [
-    ("python", "py"),
-    ("perl", "pl"),
-    ("ruby", "rb"),
-    ("node", "js"),
+/// Interpreters a shebang may name, by the name they go by there. Not an
+/// extension lookup: `m4` is not ObjectiveC's `.m`, `v` is not Coq's `.v`.
+const INTERPRETERS: &[(&str, LanguageType)] = &[
+    ("sh", LanguageType::Sh),
+    ("bash", LanguageType::Bash),
+    ("zsh", LanguageType::Zsh),
+    ("ksh", LanguageType::Ksh),
+    ("fish", LanguageType::Fish),
+    ("csh", LanguageType::CShell),
+    ("tcsh", LanguageType::CShell),
+    ("dash", LanguageType::Sh),
+    ("ash", LanguageType::Sh),
+    ("python", LanguageType::Python),
+    ("perl", LanguageType::Perl),
+    ("ruby", LanguageType::Ruby),
+    ("node", LanguageType::JavaScript),
+    ("lua", LanguageType::Lua),
+    ("php", LanguageType::Php),
+    ("awk", LanguageType::AWK),
+    ("raku", LanguageType::Raku),
+    ("perl6", LanguageType::Raku),
 ];
 
 pub fn of(path: &str, content: &[u8]) -> Option<LanguageType> {
@@ -36,15 +50,21 @@ fn from_shebang(content: &[u8]) -> Option<LanguageType> {
     let mut words = std::str::from_utf8(first_line).ok()?.split_whitespace();
     let program = words.next()?;
     let program = match program.rsplit('/').next()? {
-        "env" => words.next()?,
+        "env" => words.find(|w| !w.starts_with('-'))?,
         program => program,
     };
-    let interpreter = program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-    let extension = INTERPRETERS
+    // Try the exact name first, so "perl6" (Raku's old name) isn't mistaken
+    // for a version-numbered "perl". Only then trim a trailing version like
+    // the "3" in "python3" or "3.11".
+    by_name(program)
+        .or_else(|| by_name(program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')))
+}
+
+fn by_name(interpreter: &str) -> Option<LanguageType> {
+    INTERPRETERS
         .iter()
         .find(|(name, _)| *name == interpreter)
-        .map_or(interpreter, |(_, ext)| ext);
-    LanguageType::from_file_extension(extension)
+        .map(|(_, lang)| *lang)
 }
 
 #[cfg(test)]
@@ -62,19 +82,37 @@ mod tests {
     #[test]
     fn by_shebang_when_the_name_says_nothing() {
         for (path, content, want) in [
-            ("bin/run", "#!/bin/sh\n", LanguageType::Sh),
-            ("bin/run", "#!/usr/bin/env bash\n", LanguageType::Bash),
-            ("bin/run", "#!/usr/bin/env python3\n", LanguageType::Python),
-            ("bin/run", "#!/usr/bin/python3.11\n", LanguageType::Python),
-            ("bin/run", "#!/usr/bin/env node\n", LanguageType::JavaScript),
-            ("bin/run", "#!/usr/bin/perl\n", LanguageType::Perl),
-            ("bin/run", "#!/usr/bin/env ruby\n", LanguageType::Ruby),
+            ("bin/run", "#!/bin/sh\n", Some(LanguageType::Sh)),
+            ("bin/run", "#!/usr/bin/env bash\n", Some(LanguageType::Bash)),
+            (
+                "bin/run",
+                "#!/usr/bin/env python3\n",
+                Some(LanguageType::Python),
+            ),
+            (
+                "bin/run",
+                "#!/usr/bin/python3.11\n",
+                Some(LanguageType::Python),
+            ),
+            (
+                "bin/run",
+                "#!/usr/bin/env node\n",
+                Some(LanguageType::JavaScript),
+            ),
+            ("bin/run", "#!/usr/bin/perl\n", Some(LanguageType::Perl)),
+            ("bin/run", "#!/usr/bin/env ruby\n", Some(LanguageType::Ruby)),
+            ("bin/run", "#!/usr/bin/perl6\n", Some(LanguageType::Raku)),
+            (
+                "bin/run",
+                "#!/usr/bin/env -S python3 -u\n",
+                Some(LanguageType::Python),
+            ),
+            // An interpreter tokei has no shebang mapping for is a miss, not
+            // a guess from its first letter as a file extension (`m4` is not
+            // ObjectiveC's `.m`).
+            ("bin/run", "#!/usr/bin/env m4\n", None),
         ] {
-            assert_eq!(
-                of(path, content.as_bytes()),
-                Some(want),
-                "{path} {content:?}"
-            );
+            assert_eq!(of(path, content.as_bytes()), want, "{path} {content:?}");
         }
     }
 
@@ -82,9 +120,12 @@ mod tests {
     fn never_reads_the_working_tree() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("run");
-        std::fs::write(&file, "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(&file, "#!/bin/sh\n").unwrap();
 
         let path = file.to_str().unwrap();
-        assert_eq!(of(path, b"#!/bin/sh\n"), Some(LanguageType::Sh));
+        assert_eq!(
+            of(path, b"#!/usr/bin/env python3\n"),
+            Some(LanguageType::Python)
+        );
     }
 }

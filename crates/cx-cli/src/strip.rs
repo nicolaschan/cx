@@ -319,10 +319,10 @@ mod tests {
             strip("a.py", "s = 'it\\'s # not'  # is\n"),
             "s = 'it\\'s # not'\n"
         );
-        // A `"""` outside statement position is an ordinary (longer) string
-        // quote, not a docstring opener that's silently skipped — so the
-        // `#` and the closing `"""` inside it stay string contents, not a
-        // trailing comment. This also pins "longest opener wins".
+    }
+
+    #[test]
+    fn doc_quote_off_statement_is_a_longer_string_quote() {
         assert_eq!(
             strip("a.py", "x = \"\"\"a\" # c\"\"\"\ny = 1\n"),
             "x = \"\"\"a\" # c\"\"\"\ny = 1\n"
