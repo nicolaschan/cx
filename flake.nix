@@ -36,13 +36,9 @@
           docker = pkgs.dockerTools.buildLayeredImage {
             name = "cx";
             tag = "latest";
-            # cx shells out to git, so the image needs one.
             contents = [ pkgs.git ];
             config = {
               Entrypoint = [ "${cx}/bin/cx" ];
-              # The scored repo is bind-mounted here. It is owned by the
-              # host user, not the container's, and git refuses to read a
-              # repository with an unexpected owner unless told otherwise.
               WorkingDir = "/repo";
               Env = [
                 "GIT_CONFIG_COUNT=1"
