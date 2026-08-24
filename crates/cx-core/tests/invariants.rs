@@ -106,7 +106,7 @@ fn repeated_new_patterns_charged_once() {
     let first = s.score(&[&reference], &pattern);
     let scores = s
         .attribution(&[&reference], &[pattern.as_slice(); 4])
-        .run(&|_| {});
+        .run(|_| {});
     let total: u64 = scores.iter().sum();
 
     assert_eq!(scores[0], first);
@@ -129,11 +129,11 @@ fn attributed_scores_are_per_item_conditionals() {
     let (a, b, c) = (gen_code(301, 60), gen_code(302, 90), gen_code(303, 40));
     let items: [&[u8]; 5] = [&a, &b, &a, &c, &b];
 
-    let scores = s.attribution(&[&reference], &items).run(&|_| {});
+    let scores = s.attribution(&[&reference], &items).run(|_| {});
     for i in 0..items.len() {
         let mut prefix: Vec<&[u8]> = vec![&reference];
         prefix.extend_from_slice(&items[..i]);
-        let relabeled = s.attribution(&prefix, &items[i..]).run(&|_| {});
+        let relabeled = s.attribution(&prefix, &items[i..]).run(|_| {});
         assert_eq!(scores[i], relabeled[0], "item {i}");
     }
     assert!(
@@ -154,8 +154,8 @@ fn later_items_do_not_change_earlier_scores() {
     let s = scorer();
     let reference = gen_code(400, 100);
     let (x, y, big) = (gen_code(501, 50), gen_code(502, 50), gen_code(503, 3000));
-    let before = s.attribution(&[&reference], &[&x, &y]).run(&|_| {});
-    let after = s.attribution(&[&reference], &[&x, &y, &big]).run(&|_| {});
+    let before = s.attribution(&[&reference], &[&x, &y]).run(|_| {});
+    let after = s.attribution(&[&reference], &[&x, &y, &big]).run(|_| {});
     assert_eq!(before[..], after[..2]);
 }
 
@@ -165,10 +165,10 @@ fn empty_items_are_free() {
     let s = scorer();
     let reference = gen_code(800, 100);
     let (a, b) = (gen_code(801, 40), gen_code(802, 40));
-    let plain = s.attribution(&[&reference], &[&a, &b]).run(&|_| {});
+    let plain = s.attribution(&[&reference], &[&a, &b]).run(|_| {});
     let padded: [&[u8]; 5] = [&[], &a, &[], &b, &[]];
     assert_eq!(
-        s.attribution(&[&reference], &padded).run(&|_| {}),
+        s.attribution(&[&reference], &padded).run(|_| {}),
         [0, plain[0], 0, plain[1], 0]
     );
 }
@@ -205,7 +205,7 @@ fn progress_advances_by_exactly_the_planned_cost() {
     let attribution = s.attribution(&reference_parts, &refs);
 
     let advanced = AtomicU64::new(0);
-    attribution.run(&|bytes| {
+    attribution.run(|bytes| {
         advanced.fetch_add(bytes, Ordering::Relaxed);
     });
     assert_eq!(advanced.into_inner(), attribution.bytes());

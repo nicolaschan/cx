@@ -26,7 +26,7 @@ fn golden_scores() {
 
     let scores = s
         .attribution(&[REFERENCE], &[NOVEL, CONVENTIONAL])
-        .run(&|_| {});
+        .run(|_| {});
     assert_eq!(
         (s.score(&[], REFERENCE), s.score(&[], NOVEL), scores),
         (69, 92, vec![80, 22])
