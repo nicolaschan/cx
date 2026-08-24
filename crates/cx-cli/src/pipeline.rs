@@ -109,20 +109,26 @@ fn prepare(filter: &Filter, scope: &Scope, path: &str, raw: Vec<u8>) -> Prepared
     }
 }
 
-/// Every path with a blob, prepared. Paths whose blob is missing (a
-/// submodule, a file gone from disk) are simply absent.
+/// Every path with a blob, prepared, in the order `paths` was given.
+/// Paths whose blob is missing (a submodule, a file gone from disk) are
+/// simply absent.
 fn load<'a>(
     filter: &Filter,
     scope: &Scope,
     paths: &[&'a str],
     blobs: Vec<Option<Vec<u8>>>,
-) -> HashMap<&'a str, Prepared> {
+) -> Vec<(&'a str, Prepared)> {
     paths
         .iter()
         .copied()
         .zip(blobs)
         .filter_map(|(path, blob)| Some((path, prepare(filter, scope, path, blob?))))
         .collect()
+}
+
+/// The code of a prepared blob, or None if it was dropped (or absent).
+fn code(prepared: Option<&Prepared>) -> Option<&[u8]> {
+    prepared?.as_deref().ok()
 }
 
 #[derive(Serialize)]
@@ -214,24 +220,28 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
 
     // The whole old tree plus the new side of every change, each blob
     // filtered and reduced to code once.
-    let old_tree = load(
+    let old_tree: HashMap<&str, Prepared> = load(
         &filter,
         scope,
         &tree_refs,
         git.tree_contents(&merge_base, &tree_refs)?,
-    );
-    let new_contents = load(
+    )
+    .into_iter()
+    .collect();
+    let new_contents: HashMap<&str, Prepared> = load(
         &filter,
         scope,
         &new_side_paths,
         git.contents(scope.side, &new_side_paths)?,
-    );
+    )
+    .into_iter()
+    .collect();
 
     // The universe is kept files only: a file the filter excludes exists
     // in no reference and no scoring pass.
     let kept_tree: Vec<(&str, &[u8])> = tree_refs
         .iter()
-        .filter_map(|p| Some((*p, old_tree.get(p)?.as_deref().ok()?)))
+        .filter_map(|p| Some((*p, code(old_tree.get(p))?)))
         .collect();
 
     // Partition changes into scorable items and skipped files. A change
@@ -264,9 +274,6 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
                 reason: (*reason).to_owned(),
             });
             continue;
-        }
-        fn code(blob: Option<&Prepared>) -> Option<&[u8]> {
-            blob.and_then(|b| b.as_deref().ok())
         }
         let (old, new) = (code(old), code(new));
         if old.is_none() && new.is_none() {
@@ -378,13 +385,10 @@ pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
         .filter_map(|(p, b)| b.as_ref().map(|_| p.to_string()))
         .collect();
     let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?, scope)?;
-    // `load` hands back a map; the chain rule wants sorted-path order,
-    // which is the order `git.list` produced.
-    let mut kept: Vec<(&str, Vec<u8>)> = load(&filter, scope, &path_refs, blobs)
+    let kept: Vec<(&str, Vec<u8>)> = load(&filter, scope, &path_refs, blobs)
         .into_iter()
         .filter_map(|(p, prepared)| Some((p, prepared.ok()?)))
         .collect();
-    kept.sort_by(|a, b| a.0.cmp(b.0));
     let kept_contents: Vec<&[u8]> = kept.iter().map(|(_, c)| c.as_slice()).collect();
 
     let scorer = Scorer::default();

@@ -601,3 +601,79 @@ fn comments_are_stripped_unless_asked_to_score_them() {
     }
     assert_eq!(run(Some("1"), Some("--comments=false"))["new_lines"], 120);
 }
+
+/// The mirror of the add case: deleting a file's comments is also ≈ free,
+/// which can only hold if the *old* side and the tree reference are
+/// stripped the same way the new side is — not just the new item.
+#[test]
+fn deleting_comments_is_free_because_every_side_is_stripped() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::create_dir(root.join("src")).unwrap();
+    let code = gen_code(1, 120);
+    // A second file that never changes: it sits in the tree reference and
+    // the remainder on both sides, so if references weren't stripped its
+    // comments would perturb the neighbouring scores.
+    let other: String = String::from_utf8(gen_code(5, 80))
+        .unwrap()
+        .lines()
+        .map(|l| format!("{l} // trailing note\n"))
+        .collect();
+    fs::write(root.join("src/other.rs"), &other).unwrap();
+    let comments: String = String::from_utf8(gen_code(9, 60))
+        .unwrap()
+        .lines()
+        .map(|l| format!("// {l}\n"))
+        .collect();
+    // Base: lib.rs carries 60 comment lines above its code.
+    fs::write(
+        root.join("src/lib.rs"),
+        [comments.as_bytes(), &code].concat(),
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    // Head: the comments are gone, the code is byte-identical.
+    fs::write(root.join("src/lib.rs"), &code).unwrap();
+    git(root, &["commit", "-q", "-am", "drop comments"]);
+
+    let file = |flag: Option<&str>| -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_cx"))
+            .current_dir(root)
+            .args(["diff", "--json", "--committed"])
+            .args(flag)
+            .env_remove("CX_COMMENTS")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == "src/lib.rs")
+            .expect("lib.rs in report")
+            .clone()
+    };
+
+    // Default: old and new both strip to the same code → no refund, no cost.
+    let stripped = file(None);
+    assert!(
+        stripped["delta_bytes"].as_f64().unwrap().abs() < 64.0,
+        "deleting only comments must not refund complexity: {stripped}"
+    );
+    assert!(stripped["review_bytes"].as_f64().unwrap() < 64.0);
+
+    // With comments scored, deleting 60 real lines is a real refund.
+    let kept = file(Some("--comments"));
+    assert!(
+        kept["delta_bytes"].as_f64().unwrap() < -300.0,
+        "with --comments, dropping 60 comment lines refunds complexity: {kept}"
+    );
+}
