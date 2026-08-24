@@ -33,13 +33,11 @@ $ cx diff
 The `+`/`−`/`→` column marks added, deleted, and renamed files (`⚠` for
 density outliers).
 
-The footer line carries what the run is for — C(tree) where the view has
-it, review, ΔC — colored on the same magnitude scale as the cells above.
-Line churn rides alongside uncolored: it is the familiar size the other
-two are read against, and the point is how far they diverge from it. The
-counts are git's own — `git diff --numstat` over the files cx scored, so
-they agree with `git diff --stat` minus whatever was skipped.
-`--verbose` adds the rest:
+The footer carries what the run is for, colored on the same magnitude
+scale as the cells above — except the line churn, which stays plain: it
+is the familiar size the other numbers are read against, not a verdict
+of its own. Those counts are git's own `--numstat`, so they agree with
+`git diff --stat` minus whatever cx skipped. `--verbose` adds the rest:
 
 ```console
 $ cx --verbose

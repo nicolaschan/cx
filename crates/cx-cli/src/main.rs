@@ -82,8 +82,6 @@ impl CommonArgs {
         }
     }
 
-    /// The one place that asks where the output is going: the renderer
-    /// takes the answer as an input rather than sniffing it itself.
     fn report_options(&self) -> report::Options {
         report::Options {
             top: self.top,

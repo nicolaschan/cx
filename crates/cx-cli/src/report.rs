@@ -20,8 +20,8 @@ pub struct Options {
     pub files: bool,
     /// Emit the footer's detail lines.
     pub verbose: bool,
-    /// The caller's answer to "is the output a terminal?", applied to
-    /// tables and footer alike so a run colors everything or nothing.
+    /// Is the output a terminal? Applied to tables and footer alike, so
+    /// a run colors everything or nothing.
     pub color: bool,
 }
 
@@ -205,22 +205,23 @@ fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, show_
     }
 }
 
-/// Render entries as the dust-style table, or `None` when there is no
-/// breakdown to show. `diff_columns` names the size column ("BYTES" for
-/// tree contributions, "REVIEW" for diff cost) and adds the ΔC + status
+/// A view: `footer`, under the dust-style breakdown of `entries` where
+/// there is one. `diff_columns` names the size column ("BYTES" for tree
+/// contributions, "REVIEW" for diff cost) and adds the ΔC + status
 /// columns; `None` renders the plain tree view.
-fn breakdown_table<'a>(
+fn view<'a>(
     entries: impl IntoIterator<Item = Entry<'a>>,
     total: f64,
     opts: Options,
     diff_columns: Option<&'static str>,
-) -> Option<String> {
+    footer: String,
+) -> String {
     if !opts.files {
-        return None;
+        return footer;
     }
     let root = breakdown::breakdown(entries, opts.top);
     if root.children.is_empty() {
-        return None;
+        return footer;
     }
     let columns: &[&str] = match diff_columns {
         Some(bytes_header) => &[bytes_header, "ΔC", "", "LINES", "PATH", "SHARE"],
@@ -236,137 +237,105 @@ fn breakdown_table<'a>(
     table.set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(columns.iter().map(|c| Cell::new(c).fg(Color::DarkGrey)));
     push_children(&mut table, &root, "", total, diff_columns.is_some());
-    Some(table.to_string())
-}
-
-/// A view is its breakdown, where there is one, above its footer.
-fn page(table: Option<String>, footer: String) -> String {
-    match table {
-        Some(table) => format!("{table}\n\n{footer}"),
-        None => footer,
-    }
+    format!("{table}\n\n{footer}")
 }
 
 /// Everything under the table: one summary line, always shown, and the
-/// details `--verbose` adds. A view folds in whichever reports it holds,
-/// so what two views share is written and emitted once.
-struct Footer<'a> {
+/// details `--verbose` adds. Whichever reports a view holds fold in
+/// here, so what two views share is written and emitted once.
+fn footer(
     opts: Options,
-    version: &'a VersionInfo,
-    summary: Vec<String>,
-    details: Vec<String>,
-    /// Noisiest attribution pass folded in so far — one bad pass makes
-    /// every per-item number in the view suspect.
-    scale: f64,
-}
-
-impl<'a> Footer<'a> {
-    fn new(opts: Options, version: &'a VersionInfo) -> Self {
-        Footer {
-            opts,
-            version,
-            summary: Vec::new(),
-            details: Vec::new(),
-            scale: 1.0,
-        }
-    }
-
-    fn abs(mut self, abs: &AbsReport) -> Self {
-        let opts = self.opts;
+    version: &VersionInfo,
+    abs: Option<&AbsReport>,
+    diff: Option<&DiffReport>,
+) -> String {
+    let mut summary = Vec::new();
+    let mut details = Vec::new();
+    if let Some(abs) = abs {
         // C(tree) is a whole-repo absolute, not a change: no magnitude
         // color, which would sit permanently red.
-        self.summary
-            .push(opts.stat("C(tree)", fmt_bytes(abs.compressed_bytes as f64), None));
-        self.details.push(opts.dim(format!(
+        summary.push(opts.stat("C(tree)", fmt_bytes(abs.compressed_bytes as f64), None));
+        details.push(opts.dim(format!(
             "C(tree) over {} files ({} raw)",
             abs.file_count,
             fmt_bytes(abs.raw_bytes as f64),
         )));
-        self.scale = noisier(self.scale, abs.scale);
-        self
     }
-
-    fn diff(mut self, diff: &DiffReport) -> Self {
-        let opts = self.opts;
+    if let Some(diff) = diff {
         // The totals carry the same magnitude coloring as the cells they
         // sum, so a red total and a red row mean one thing.
         let review = diff.totals.review_bytes as f64;
         let delta = diff.totals.delta_bytes as f64;
         if diff.files.is_empty() && diff.skipped.is_empty() {
-            self.summary
-                .push(opts.dim(format!("no scorable changes against {}", diff.base)));
+            summary.push(opts.dim(format!("no scorable changes against {}", diff.base)));
         } else {
-            self.summary
-                .push(opts.stat("review", fmt_bytes(review), score_color(review)));
-            self.summary
-                .push(opts.stat("ΔC", fmt_signed(delta), score_color(delta)));
-            // The familiar size ΔC is read against, so it sits next to
-            // it — uncolored, because it is the reference, not a
-            // verdict, and no line count means the same thing in two
-            // repos the way the byte thresholds do.
+            summary.push(opts.stat("review", fmt_bytes(review), score_color(review)));
+            summary.push(opts.stat("ΔC", fmt_signed(delta), score_color(delta)));
+            // The familiar size ΔC is read against, not a verdict of its
+            // own, so it stays uncolored.
             let (added, deleted) = (diff.totals.added_lines, diff.totals.deleted_lines);
-            self.summary
-                .push(opts.stat("lines", format!("+{added} −{deleted}"), None));
+            summary.push(opts.stat("lines", format!("+{added} −{deleted}"), None));
         }
         if !diff.skipped.is_empty() {
             // The count stays on the summary line: it says the totals
             // beside it do not cover everything that changed.
-            self.summary
-                .push(opts.dim(format!("{} skipped", diff.skipped.len())));
+            summary.push(opts.dim(format!("{} skipped", diff.skipped.len())));
             let list: Vec<String> = diff
                 .skipped
                 .iter()
                 .map(|s| format!("{} ({})", s.path, s.reason))
                 .collect();
-            self.details
-                .push(opts.dim(format!("skipped: {}", list.join(", "))));
+            details.push(opts.dim(format!("skipped: {}", list.join(", "))));
         }
-        self.scale = [
-            diff.scales.review,
-            diff.scales.delta_new,
-            diff.scales.delta_old,
-        ]
-        .into_iter()
-        .fold(self.scale, noisier);
-        self
     }
-
-    fn render(mut self) -> String {
-        let (opts, v) = (self.opts, self.version);
-        let mut lines = vec![self.summary.join("   ")];
-        if opts.verbose {
-            let (verdict, color) = if (0.7..=1.1).contains(&self.scale) {
-                ("ok", Color::Green)
-            } else {
-                (
-                    "noisy — trust totals, not per-file attribution",
-                    Color::Yellow,
-                )
-            };
-            self.details.push(format!(
-                "{} {}   {}",
-                opts.dim("attribution scale:"),
-                opts.paint(format!("{:.2} ({verdict})", self.scale), Some(color)),
-                // Provenance: the scores mean nothing without it, but it
-                // never changes run to run — dim.
-                opts.dim(format!(
-                    "zstd {}, level {}, window≤2^{}",
-                    v.zstd, v.level, v.max_window_log
-                )),
-            ));
-            lines.append(&mut self.details);
-        }
-        lines.iter().map(|line| format!(" {line}\n")).collect()
+    let mut lines = vec![summary.join("   ")];
+    if opts.verbose {
+        details.push(format!(
+            "{}   {}",
+            scale_gauge(opts, abs, diff),
+            // Provenance: the scores mean nothing without it, but it
+            // never changes run to run — dim.
+            opts.dim(format!(
+                "zstd {}, level {}, window≤2^{}",
+                version.zstd, version.level, version.max_window_log
+            )),
+        ));
+        lines.append(&mut details);
     }
+    lines.iter().map(|line| format!(" {line}\n")).collect()
 }
 
-/// Of two attribution scales, the one further from 1.0.
-fn noisier(a: f64, b: f64) -> f64 {
-    if (b - 1.0).abs() > (a - 1.0).abs() {
-        b
+/// The attribution noise gauge, colored by whether per-item numbers can
+/// be trusted at all. It covers every pass the view merged, reporting
+/// the worst: one bad pass makes every per-item number in it suspect.
+fn scale_gauge(opts: Options, abs: Option<&AbsReport>, diff: Option<&DiffReport>) -> String {
+    let scales = diff
+        .into_iter()
+        .flat_map(|d| [d.scales.review, d.scales.delta_new, d.scales.delta_old]);
+    let worst = abs
+        .map(|a| a.scale)
+        .into_iter()
+        .chain(scales)
+        .fold(1.0f64, |acc, s| {
+            if (s - 1.0).abs() > (acc - 1.0).abs() {
+                s
+            } else {
+                acc
+            }
+        });
+    let (verdict, color) = if (0.7..=1.1).contains(&worst) {
+        ("ok", Color::Green)
     } else {
-        a
-    }
+        (
+            "noisy — trust totals, not per-file attribution",
+            Color::Yellow,
+        )
+    };
+    opts.stat(
+        "attribution scale:",
+        format!("{worst:.2} ({verdict})"),
+        Some(color),
+    )
 }
 
 /// The diff view: same dust-style renderer as the overview, but only the
@@ -377,9 +346,12 @@ pub fn render_diff(report: &DiffReport, opts: Options) -> String {
         .files
         .iter()
         .map(|f| entry(&f.path, f.review_bytes, f.new_lines, Some(f)));
-    page(
-        breakdown_table(entries, total, opts, Some("REVIEW")),
-        Footer::new(opts, &report.version).diff(report).render(),
+    view(
+        entries,
+        total,
+        opts,
+        Some("REVIEW"),
+        footer(opts, &report.version, None, Some(report)),
     )
 }
 
@@ -401,9 +373,12 @@ pub fn render_overview(abs: &AbsReport, diff: &DiffReport, opts: Options) -> Str
     );
 
     let total = abs.compressed_bytes.max(1) as f64;
-    page(
-        breakdown_table(entries, total, opts, Some("BYTES")),
-        Footer::new(opts, &abs.version).abs(abs).diff(diff).render(),
+    view(
+        entries,
+        total,
+        opts,
+        Some("BYTES"),
+        footer(opts, &abs.version, Some(abs), Some(diff)),
     )
 }
 
@@ -413,9 +388,12 @@ pub fn render_abs(report: &AbsReport, opts: Options) -> String {
         .files
         .iter()
         .map(|f| entry(&f.path, f.bytes, f.lines, None));
-    page(
-        breakdown_table(entries, total, opts, None),
-        Footer::new(opts, &report.version).abs(report).render(),
+    view(
+        entries,
+        total,
+        opts,
+        None,
+        footer(opts, &report.version, Some(report), None),
     )
 }
 

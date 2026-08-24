@@ -75,9 +75,9 @@ pub struct Skipped {
 pub struct Totals {
     pub review_bytes: u64,
     pub delta_bytes: i64,
-    /// Lines added and deleted over the scored files — the familiar
-    /// size next to the one this tool exists to report. Skipped files
-    /// are not in it, so it counts what the bytes above it cover.
+    /// Lines added and deleted over the scored files: the familiar size
+    /// beside the one this tool exists to report. Skipped files are not
+    /// in it, so it covers what the bytes above it cover.
     pub added_lines: u64,
     pub deleted_lines: u64,
 }
