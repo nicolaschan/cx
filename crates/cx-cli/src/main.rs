@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use cx_cli::git::{Git, Side};
 use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::progress::Progress;
 use cx_cli::report;
 
 /// Score git trees and diffs by marginal description length: how much
@@ -91,7 +92,6 @@ impl CommonArgs {
 
     fn abs_options(&self) -> AbsOptions {
         AbsOptions {
-            no_files: self.no_files,
             ignore_tests: self.ignore_tests,
             side: self.side(),
         }
@@ -145,11 +145,14 @@ fn emit<T: serde::Serialize>(json: bool, value: &T, rendered: String) -> Result<
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let git = Git::discover()?;
+    let progress = Progress {
+        visible: std::io::stderr().is_terminal(),
+    };
     match cli.cmd {
         None => {
             let common = cli.common;
-            let abs = pipeline::abs(&git, &common.abs_options())?;
-            let diff = pipeline::diff(&git, &cli.diff.options(&common))?;
+            let abs = pipeline::abs(&git, &common.abs_options(), progress)?;
+            let diff = pipeline::diff(&git, &cli.diff.options(&common), progress)?;
             emit(
                 common.json,
                 &serde_json::json!({ "abs": abs, "diff": diff }),
@@ -164,7 +167,7 @@ fn main() -> Result<()> {
             if matches!(granularity, Granularity::Hunk) {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
-            let report = pipeline::diff(&git, &diff.options(&common))?;
+            let report = pipeline::diff(&git, &diff.options(&common), progress)?;
             emit(
                 common.json,
                 &report,
@@ -172,7 +175,7 @@ fn main() -> Result<()> {
             )?;
         }
         Some(Cmd::Abs { common }) => {
-            let report = pipeline::abs(&git, &common.abs_options())?;
+            let report = pipeline::abs(&git, &common.abs_options(), progress)?;
             emit(
                 common.json,
                 &report,

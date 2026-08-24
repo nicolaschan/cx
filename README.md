@@ -2,8 +2,9 @@
 
 Score git diffs by **marginal description length**: how much new information
 a change adds, conditioned on what the codebase already contains. The
-estimator is zstd with the repo as a reference prefix — language-independent,
-grounded in MDL / the software-naturalness literature (Hindle et al. 2012;
+estimator is one zstd stream — the codebase first, then the change, a flush
+at every file — so a file's score is the bytes it adds to the compressed
+output. Language-independent, grounded in MDL / the software-naturalness literature (Hindle et al. 2012;
 Ray et al. 2016).
 
 Two independent axes per file, one PR total:
@@ -43,7 +44,7 @@ $ cx --verbose
  C(tree) 23.4 KB   review 4.4 KB   ΔC +3.9 KB   lines +1298 −431   1 skipped
  C(tree) over 23 files (83.7 KB raw)
  skipped: Cargo.lock (generated/vendored pattern)
- attribution scale: 0.94 (ok)   zstd 1.5.7, level 19, window≤2^31
+ zstd 1.5.7, level 19, window≤2^31
 ```
 
 ```
@@ -68,17 +69,16 @@ The tree breakdown is dust-style: contributions aggregate up the
 directory tree, only the `-n` globally biggest files/directories are
 shown (default 30), and everything pruned collapses into a per-directory
 `… +N more` row — so the view stays one screen even on repos with
-thousands of files. `--no-files` suppresses the breakdown and, on `cx`
-and `cx abs`, skips computing it entirely. Output colorizes on a
-terminal and degrades to plain text when piped.
+thousands of files. `--no-files` suppresses the breakdown. Output colorizes on a terminal
+and degrades to plain text when piped; a progress bar on stderr tracks the
+run while it is a terminal.
 
 `--json` emits the full report (per-file scores, skipped files, totals,
-scale factors, compressor version) — the stable contract for tooling.
+compressor version) — the stable contract for tooling.
 
-Per-file attribution is sequential (chain rule): a pattern repeated across
-files in one PR is charged once, at its first occurrence. Sums are robust;
-`--verbose`'s `attribution scale` line is the built-in noise gauge (≈ 1.0
-→ trust per-file numbers, far off → trust totals).
+Per-file attribution is the chain rule: a pattern repeated across files
+in one PR is charged once, at its first occurrence, and per-file scores
+sum exactly to the total.
 
 Files are filtered before scoring: `.gitattributes` linguist annotations,
 binary detection, common generated/vendored patterns (lockfiles, `dist/`,
