@@ -73,6 +73,12 @@ struct CommonArgs {
         value_parser = BoolishValueParser::new(),
     )]
     prose: bool,
+    /// Restrict the run to paths matching GLOB. Repeatable; gitignore
+    /// syntax, `!` excludes, and among globs the last match wins. Paths
+    /// outside the scope are not scored and not part of the reference —
+    /// `-g 'crates/api/**'` sizes that subtree as its own codebase.
+    #[arg(short = 'g', long = "glob", env = "CX_GLOB", value_name = "GLOB")]
+    globs: Vec<String>,
     /// Hide the per-file breakdown; show the summary line only.
     #[arg(long)]
     no_files: bool,
@@ -102,6 +108,7 @@ impl DiffArgs {
             include_tests: common.include_tests,
             comments: common.comments,
             prose: common.prose,
+            globs: common.globs.clone(),
         }
     }
 }
@@ -123,6 +130,7 @@ impl CommonArgs {
             comments: self.comments,
             prose: self.prose,
             side: self.side(),
+            globs: self.globs.clone(),
         }
     }
 
