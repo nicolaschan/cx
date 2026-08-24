@@ -3,12 +3,13 @@
 //! and block delimiters, nesting, string quotes), so a `//` inside a
 //! string literal is code and `r#"/* … */"#` survives intact.
 
-use tokei::{Config, LanguageType};
+use crate::language;
 
 /// `content` with its comments removed and whitespace-only lines dropped,
-/// or `content` itself when `path` names no language tokei knows.
+/// or `content` itself when `path` and `content` name no language tokei
+/// knows.
 pub fn code_only(path: &str, content: Vec<u8>) -> Vec<u8> {
-    match Syntax::of(path) {
+    match Syntax::of(path, &content) {
         Some(syntax) => syntax.strip(&content),
         None => content,
     }
@@ -60,8 +61,8 @@ enum State {
 }
 
 impl Syntax {
-    fn of(path: &str) -> Option<Self> {
-        let lang = LanguageType::from_path(path, &Config::default())?;
+    fn of(path: &str, content: &[u8]) -> Option<Self> {
+        let lang = language::of(path, content)?;
         Some(Syntax {
             line: lang.line_comments(),
             block: lang.multi_line_comments(),
@@ -74,7 +75,11 @@ impl Syntax {
     }
 
     /// The longest opener starting at `rest`, so `"""` beats `"` and
-    /// `r#"` beats `"`. Docstrings only count at the start of a statement.
+    /// `r#"` beats `"`. A doc-quote is a comment only at the start of a
+    /// statement; elsewhere it's just a (longer) string quote. On a tie,
+    /// a comment beats a string quote (checked first, kept on equal
+    /// length) — swallowing one line wrong is cheaper than swallowing
+    /// the rest of the file.
     fn opener_at(&self, rest: &[u8], statement_start: bool) -> Option<(usize, Opener)> {
         let mut best: Option<(usize, Opener)> = None;
         let mut consider = |token: &'static str, opener: Opener| {
@@ -121,30 +126,31 @@ impl Syntax {
                 },
             );
         }
-        if statement_start {
-            for &(o, c) in self.doc {
-                consider(
-                    o,
-                    Opener::Block {
-                        open: None,
-                        close: c,
-                    },
-                );
-            }
+        for &(o, c) in self.doc {
+            let opener = if statement_start {
+                Opener::Block {
+                    open: None,
+                    close: c,
+                }
+            } else {
+                Opener::Str {
+                    close: c,
+                    verbatim: false,
+                }
+            };
+            consider(o, opener);
         }
         best
     }
 
     fn strip(&self, src: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(src.len());
+        let mut out = Out::with_capacity(src.len());
         let mut state = State::Code;
-        // Nothing but whitespace since the last newline.
-        let mut statement_start = true;
         let mut i = 0;
         while i < src.len() {
             let rest = &src[i..];
             match state {
-                State::Code => match self.opener_at(rest, statement_start) {
+                State::Code => match self.opener_at(rest, out.statement_start) {
                     Some((len, Opener::Line)) => {
                         state = State::Line;
                         i += len;
@@ -158,21 +164,21 @@ impl Syntax {
                         i += len;
                     }
                     Some((len, Opener::Str { close, verbatim })) => {
-                        emit(&mut out, &mut statement_start, &rest[..len]);
+                        out.push(&rest[..len]);
                         state = State::Str { close, verbatim };
                         i += len;
                     }
                     None => {
-                        emit(&mut out, &mut statement_start, &rest[..1]);
+                        out.push(&rest[..1]);
                         i += 1;
                     }
                 },
                 State::Line => {
                     if rest[0] == b'\n' {
+                        out.push(b"\n");
                         state = State::Code;
-                    } else {
-                        i += 1;
                     }
+                    i += 1;
                 }
                 State::Block { open, close, depth } => {
                     if rest.starts_with(close.as_bytes()) {
@@ -195,7 +201,7 @@ impl Syntax {
                         };
                     } else {
                         if rest[0] == b'\n' {
-                            emit(&mut out, &mut statement_start, b"\n");
+                            out.push(b"\n");
                         }
                         i += 1;
                     }
@@ -203,30 +209,44 @@ impl Syntax {
                 State::Str { close, verbatim } => {
                     if !verbatim && rest[0] == b'\\' {
                         let n = rest.len().min(2);
-                        emit(&mut out, &mut statement_start, &rest[..n]);
+                        out.push(&rest[..n]);
                         i += n;
                     } else if rest.starts_with(close.as_bytes()) {
-                        emit(&mut out, &mut statement_start, close.as_bytes());
+                        out.push(close.as_bytes());
                         state = State::Code;
                         i += close.len();
                     } else {
-                        emit(&mut out, &mut statement_start, &rest[..1]);
+                        out.push(&rest[..1]);
                         i += 1;
                     }
                 }
             }
         }
-        without_blank_lines(&out)
+        without_blank_lines(&out.bytes)
     }
 }
 
-/// Appends `bytes` to `out`, updating whether the scan is still at the
-/// start of a statement (nothing but whitespace since the last newline).
-fn emit(out: &mut Vec<u8>, statement_start: &mut bool, bytes: &[u8]) {
-    for &b in bytes {
-        *statement_start = b == b'\n' || (*statement_start && b.is_ascii_whitespace());
+/// Output under construction, tracking whether the current line so far
+/// holds nothing but whitespace — where a docstring is a statement.
+struct Out {
+    bytes: Vec<u8>,
+    statement_start: bool,
+}
+
+impl Out {
+    fn with_capacity(capacity: usize) -> Self {
+        Out {
+            bytes: Vec::with_capacity(capacity),
+            statement_start: true,
+        }
     }
-    out.extend_from_slice(bytes);
+
+    fn push(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.statement_start = b == b'\n' || (self.statement_start && b.is_ascii_whitespace());
+        }
+        self.bytes.extend_from_slice(bytes);
+    }
 }
 
 /// Each line right-trimmed, whitespace-only lines gone, every line
@@ -299,6 +319,14 @@ mod tests {
             strip("a.py", "s = 'it\\'s # not'  # is\n"),
             "s = 'it\\'s # not'\n"
         );
+        // A `"""` outside statement position is an ordinary (longer) string
+        // quote, not a docstring opener that's silently skipped — so the
+        // `#` and the closing `"""` inside it stay string contents, not a
+        // trailing comment. This also pins "longest opener wins".
+        assert_eq!(
+            strip("a.py", "x = \"\"\"a\" # c\"\"\"\ny = 1\n"),
+            "x = \"\"\"a\" # c\"\"\"\ny = 1\n"
+        );
     }
 
     #[test]
@@ -345,5 +373,21 @@ mod tests {
         let src = b"// looks like a comment\n\n".to_vec();
         assert_eq!(code_only("notes.unknownext", src.clone()), src);
         assert_eq!(code_only("Makefile", b"# c\nall:\n".to_vec()), b"all:\n");
+    }
+
+    #[test]
+    fn shebang_decides_the_language_when_the_path_does_not() {
+        assert_eq!(
+            code_only("bin/run", b"#!/bin/sh\n# c\necho hi\n".to_vec()),
+            b"echo hi\n"
+        );
+    }
+
+    #[test]
+    fn line_comment_beats_string_quote_on_a_tie() {
+        assert_eq!(
+            strip("a.vim", "let s = \"x\" | echo s\n\" comment\nlet t = 1\n"),
+            "let s =\nlet t = 1\n"
+        );
     }
 }

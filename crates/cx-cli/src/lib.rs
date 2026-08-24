@@ -1,6 +1,7 @@
 pub mod breakdown;
 pub mod filter;
 pub mod git;
+pub mod language;
 pub mod pipeline;
 pub mod report;
 pub mod strip;
