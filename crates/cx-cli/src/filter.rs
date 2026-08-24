@@ -2,7 +2,7 @@
 //! 1. `.gitattributes` linguist-generated / -vendored / -documentation
 //! 2. binary detection on content (UTF-16/32 aware)
 //! 3. ported linguist generated/vendored patterns
-//! 4. test files, when `--ignore-tests` asks for it
+//! 4. test files, unless `--include-tests` asks to keep them
 //! 5. `.cxignore`
 //!
 //! The density backstop (layer 6) lives in the report, not here — it
@@ -75,7 +75,7 @@ fn is_test_path(path: &str) -> bool {
 pub struct Filter {
     attrs: HashMap<String, LinguistAttrs>,
     patterns: GlobSet,
-    ignore_tests: bool,
+    include_tests: bool,
     cxignore: Option<Gitignore>,
 }
 
@@ -93,7 +93,7 @@ impl Filter {
     pub fn new(
         root: &Path,
         attrs: HashMap<String, LinguistAttrs>,
-        ignore_tests: bool,
+        include_tests: bool,
     ) -> Result<Self> {
         let cxignore_path = root.join(".cxignore");
         let cxignore = cxignore_path.exists().then(|| {
@@ -104,7 +104,7 @@ impl Filter {
         Ok(Filter {
             attrs,
             patterns: glob_set(&LINGUIST_PATTERNS)?,
-            ignore_tests,
+            include_tests,
             cxignore: cxignore.transpose()?,
         })
     }
@@ -129,7 +129,7 @@ impl Filter {
         if self.patterns.is_match(path) {
             return Some("generated/vendored pattern");
         }
-        if self.ignore_tests && is_test_path(path) {
+        if !self.include_tests && is_test_path(path) {
             return Some("test");
         }
         if let Some(ig) = &self.cxignore
@@ -145,6 +145,7 @@ impl Filter {
 mod tests {
     use super::*;
 
+    /// The default filter: tests excluded.
     fn filter() -> Filter {
         Filter::new(Path::new("/nonexistent"), HashMap::new(), false).unwrap()
     }
@@ -207,10 +208,11 @@ mod tests {
     }
 
     #[test]
-    fn keeps_tests_unless_asked_to_ignore_them() {
-        let f = filter();
+    fn drops_tests_unless_asked_to_include_them() {
+        let including = Filter::new(Path::new("/nonexistent"), HashMap::new(), true).unwrap();
         for path in ["tests/e2e.rs", "src/parser_test.go", "web/app.spec.ts"] {
-            assert_eq!(f.exclusion(path, b"code"), None, "{path} kept by default");
+            assert_eq!(filter().exclusion(path, b"code"), Some("test"), "{path}");
+            assert_eq!(including.exclusion(path, b"code"), None, "{path} included");
         }
     }
 
@@ -220,7 +222,7 @@ mod tests {
     /// knows (`conftest.py`, `FooTest.java`) go undetected.
     #[test]
     fn detects_tests_by_naming_convention() {
-        let f = Filter::new(Path::new("/nonexistent"), HashMap::new(), true).unwrap();
+        let f = filter();
         for (path, is_test) in [
             // Test directories, at any depth, any separator, any case.
             ("tests/end_to_end.rs", true),

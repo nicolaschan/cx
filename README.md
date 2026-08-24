@@ -51,7 +51,7 @@ cx       [-n <N>] [--base <ref>]  # overview: one merged table — tree breakdow
 cx diff  [-n <N>] [--base <ref>]  # just the diff, sized by review cost
 cx abs   [-n <N>]                 # absolute C(tree): the trend-line number
 
-# any of the above: [--staged|--committed] [-v|--verbose] [--no-files] [--ignore-tests] [--json]
+# any of the above: [--staged|--committed] [-v|--verbose] [--no-files] [--include-tests] [--json]
 ```
 
 Every view scores the **working tree** by default — staged and unstaged
@@ -59,9 +59,9 @@ changes, plus untracked files that aren't ignored. `--staged` scores the
 index; `--committed` scores HEAD. `abs` takes the same choice — `C(tree)`
 and `ΔCX` describe the same snapshot.
 
-Defaults can be pinned through the environment — `CX_IGNORE_TESTS=1`,
+Defaults can be pinned through the environment — `CX_INCLUDE_TESTS=1`,
 `CX_TOP=15`, `CX_BASE=develop` — and any single run can still override
-them on the command line (`--ignore-tests=false`, `-n 50`). `cx --help`
+them on the command line (`--include-tests=false`, `-n 50`). `cx --help`
 lists which variable backs each flag.
 
 The tree breakdown is dust-style: contributions aggregate up the
@@ -84,8 +84,9 @@ Files are filtered before scoring: `.gitattributes` linguist annotations,
 binary detection, common generated/vendored patterns (lockfiles, `dist/`,
 `vendor/`, minified assets…), and a `.cxignore` (gitignore syntax).
 
-`--ignore-tests` adds test files, recognised by naming convention
-alone — no language, build system, or parser. A path is a test when any
+Test files go too, recognised by naming convention alone — no language,
+build system, or parser. `--include-tests` scores them anyway, for the
+runs that want the whole picture. A path is a test when any
 segment of it, split on `/`, `_`, `-`, and `.`, is `test`, `tests`, or
 `spec`, or when a *directory* segment is `e2e`, `mocks`, or `testdata`.
 So `foo_test.go`, `foo-test.js`, `foo.test.ts`, `test_foo.py`,
