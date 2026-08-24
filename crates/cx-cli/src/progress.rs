@@ -1,29 +1,24 @@
-//! Progress on stderr while scoring runs, drawn by indicatif. A phase is
-//! sized in the bytes zstd will index — the unit cx-core reports in — so
-//! the bar and its ETA track wall-clock rather than file count.
+//! Progress on stderr, drawn by indicatif. A phase is sized in bytes to
+//! compress rather than files, so the bar and its ETA track wall-clock.
 
 use std::time::Duration;
 
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressFinish, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 /// Whether progress may draw at all: the caller's answer to "is stderr a
 /// terminal?", decided once, the way color is for stdout.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct Progress {
-    visible: bool,
+    pub visible: bool,
 }
 
 impl Progress {
-    pub fn new(visible: bool) -> Self {
-        Progress { visible }
-    }
-
     pub fn hidden() -> Self {
-        Self::new(false)
+        Progress { visible: false }
     }
 
-    /// A bar over `cost` bytes of work; clears itself when dropped.
-    pub fn phase(self, label: &str, cost: u64) -> Phase {
+    /// A bar over `cost` bytes of work.
+    pub fn phase(self, label: &'static str, cost: u64) -> Phase {
         self.start(
             label,
             Some(cost),
@@ -31,12 +26,12 @@ impl Progress {
         )
     }
 
-    /// A spinner for one indivisible job; clears itself when dropped.
-    pub fn spinner(self, label: &str) -> Phase {
+    /// A spinner for one indivisible job.
+    pub fn spinner(self, label: &'static str) -> Phase {
         self.start(label, None, " {spinner:.dim} {msg:.dim} {elapsed:.dim}")
     }
 
-    fn start(self, label: &str, len: Option<u64>, template: &str) -> Phase {
+    fn start(self, label: &'static str, len: Option<u64>, template: &str) -> Phase {
         if !self.visible {
             return Phase(ProgressBar::hidden());
         }
@@ -45,14 +40,14 @@ impl Progress {
             .progress_chars("██░");
         let bar = ProgressBar::with_draw_target(len, ProgressDrawTarget::stderr())
             .with_style(style)
-            .with_message(label.to_owned())
-            .with_finish(ProgressFinish::AndClear);
+            .with_message(label);
         bar.enable_steady_tick(Duration::from_millis(100));
         Phase(bar)
     }
 }
 
-/// One running phase's bar; advances from any thread.
+/// One running phase's bar: advances from any thread, clears itself when
+/// dropped.
 pub struct Phase(ProgressBar);
 
 impl cx_core::Progress for Phase {

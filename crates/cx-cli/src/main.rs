@@ -83,10 +83,10 @@ impl CommonArgs {
         }
     }
 
-    /// Progress draws on stderr only while stderr is a terminal — decided
-    /// here, like color for stdout, never sniffed by the drawer.
     fn progress(&self) -> Progress {
-        Progress::new(std::io::stderr().is_terminal())
+        Progress {
+            visible: std::io::stderr().is_terminal(),
+        }
     }
 
     /// The one place that asks where the output is going: the renderer
