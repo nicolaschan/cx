@@ -433,7 +433,7 @@ mod tests {
     fn abs_report() -> AbsReport {
         AbsReport {
             version: version(),
-            rev: "HEAD".into(),
+            snapshot: "HEAD",
             file_count: 2,
             raw_bytes: 40960,
             compressed_bytes: 10240,
