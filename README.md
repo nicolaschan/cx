@@ -27,19 +27,20 @@ $ cx diff
      ≈0  −5.0 KB  −      -  │   └── poller.rs        ░░░░░░░░░░   0.1%
  1.9 KB   +248 B        92  └── README.md            █░░░░░░░░░   9.5%
 
- review 4.4 KB   ΔC +3.9 KB   1 skipped
+ review 4.4 KB   ΔC +3.9 KB   lines +1298 −431   1 skipped
 ```
 
 The `+`/`−`/`→` column marks added, deleted, and renamed files (`⚠` for
 density outliers).
 
-The footer line carries what the run is for — C(tree) where the view has
-it, review, ΔC — colored on the same magnitude scale as the cells above.
-`--verbose` adds the rest:
+The footer is colored on the same magnitude scale as the cells above,
+except the line churn — the familiar size the others are read against,
+not a verdict of its own. Those counts are git's `--numstat` minus
+whatever cx skipped. `--verbose` adds the rest:
 
 ```console
 $ cx --verbose
- C(tree) 23.4 KB   review 4.4 KB   ΔC +3.9 KB   1 skipped
+ C(tree) 23.4 KB   review 4.4 KB   ΔC +3.9 KB   lines +1298 −431   1 skipped
  C(tree) over 23 files (83.7 KB raw)
  skipped: Cargo.lock (generated/vendored pattern)
  attribution scale: 0.94 (ok)   zstd 1.5.7, level 19, window≤2^31
@@ -51,7 +52,7 @@ cx       [-n <N>] [--base <ref>] [--staged]   # overview: one merged table — t
 cx diff  [-n <N>] [--base <ref>] [--staged]   # just the diff, sized by review cost
 cx abs   [-n <N>]                             # absolute C(tree): the trend-line number
 
-# every view: [-v|--verbose] [--no-files] [--ignore-tests] [--json]
+# any of the above: [-v|--verbose] [--no-files] [--ignore-tests] [--json]
 ```
 
 Defaults can be pinned through the environment — `CX_IGNORE_TESTS=1`,
@@ -63,9 +64,9 @@ The tree breakdown is dust-style: contributions aggregate up the
 directory tree, only the `-n` globally biggest files/directories are
 shown (default 30), and everything pruned collapses into a per-directory
 `… +N more` row — so the view stays one screen even on repos with
-thousands of files. `--no-files` suppresses the breakdown, leaving the
-footer alone (on `cx` and `cx abs` it also skips computing it entirely).
-Output colorizes on a terminal and degrades to plain text when piped.
+thousands of files. `--no-files` suppresses the breakdown and, on `cx`
+and `cx abs`, skips computing it entirely. Output colorizes on a
+terminal and degrades to plain text when piped.
 
 `--json` emits the full report (per-file scores, skipped files, totals,
 scale factors, compressor version) — the stable contract for tooling.

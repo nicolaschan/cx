@@ -98,9 +98,10 @@ impl Git {
         Ok(split_nul(&out))
     }
 
-    /// Changed files between `from` and either HEAD or the index.
-    pub fn changes(&self, from: &str, staged: bool) -> Result<Vec<Change>> {
-        let mut args = vec!["diff", "--name-status", "-z", "--find-renames"];
+    /// Shared so both listings below describe the same diff, renames
+    /// included.
+    fn diff(&self, format: &str, from: &str, staged: bool) -> Result<Vec<String>> {
+        let mut args = vec!["diff", format, "-z", "--find-renames"];
         if staged {
             args.push("--cached");
         }
@@ -108,8 +109,12 @@ impl Git {
         if !staged {
             args.push("HEAD");
         }
-        let out = self.run(&args)?;
-        let fields = split_nul(&out);
+        Ok(split_nul(&self.run(&args)?))
+    }
+
+    /// Changed files between `from` and either HEAD or the index.
+    pub fn changes(&self, from: &str, staged: bool) -> Result<Vec<Change>> {
+        let fields = self.diff("--name-status", from, staged)?;
         let mut changes = Vec::new();
         let mut it = fields.into_iter();
         while let Some(status) = it.next() {
@@ -147,6 +152,27 @@ impl Git {
             }
         }
         Ok(changes)
+    }
+
+    /// Lines (added, deleted) per path, keyed as [`Git::changes`] keys them.
+    pub fn line_counts(&self, from: &str, staged: bool) -> Result<HashMap<String, (u64, u64)>> {
+        // `-` for a binary file, which the filter drops before summing.
+        let count = |s: &str| s.parse().unwrap_or(0);
+        let mut counts = HashMap::new();
+        let mut fields = self.diff("--numstat", from, staged)?.into_iter();
+        while let Some(record) = fields.next() {
+            let (added, rest) = record.split_once('\t').context("numstat without a tab")?;
+            let (deleted, path) = rest.split_once('\t').context("numstat without a path")?;
+            // A rename leaves that path empty and follows with its
+            // source and then its destination.
+            let path = if path.is_empty() {
+                fields.nth(1).context("rename without paths")?
+            } else {
+                path.to_owned()
+            };
+            counts.insert(path, (count(added), count(deleted)));
+        }
+        Ok(counts)
     }
 
     /// Bulk-fetch blob contents. Specs are object names (`<rev>:<path>`,

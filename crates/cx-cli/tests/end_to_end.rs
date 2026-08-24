@@ -123,6 +123,34 @@ fn scores_a_realistic_branch() {
     }
 }
 
+/// Line churn, counted as git counts it: the fixture adds novel.rs and
+/// novel_test.rs (120 lines each) and deletes gone.rs (120), while the
+/// rename of mover.rs and the skipped lockfile and binary count for
+/// nothing.
+#[test]
+fn line_churn_counts_what_git_counts() {
+    let (_dir, git) = setup();
+    let report = pipeline::diff(&git, &DiffOptions::default()).unwrap();
+    assert_eq!(
+        (report.totals.added_lines, report.totals.deleted_lines),
+        (240, 120)
+    );
+
+    // Excluding the test file drops exactly its lines, no others.
+    let without = pipeline::diff(
+        &git,
+        &DiffOptions {
+            ignore_tests: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        (without.totals.added_lines, without.totals.deleted_lines),
+        (120, 120)
+    );
+}
+
 /// What excluding tests must and must not do to the numbers. That the
 /// flag reaches scoring at all is covered through the binary below.
 #[test]
