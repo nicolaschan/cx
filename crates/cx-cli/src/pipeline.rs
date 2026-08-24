@@ -75,8 +75,6 @@ pub struct Skipped {
 pub struct Totals {
     pub review_bytes: u64,
     pub delta_bytes: i64,
-    /// Line churn over the same scored files the bytes above cover: the
-    /// familiar size beside the one this tool exists to report.
     pub added_lines: u64,
     pub deleted_lines: u64,
 }

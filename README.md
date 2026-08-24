@@ -33,11 +33,10 @@ $ cx diff
 The `+`/`−`/`→` column marks added, deleted, and renamed files (`⚠` for
 density outliers).
 
-The footer carries what the run is for, colored on the same magnitude
-scale as the cells above — except the line churn, which stays plain: it
-is the familiar size the other numbers are read against, not a verdict
-of its own. Those counts are git's own `--numstat`, so they agree with
-`git diff --stat` minus whatever cx skipped. `--verbose` adds the rest:
+The footer is colored on the same magnitude scale as the cells above,
+except the line churn — the familiar size the others are read against,
+not a verdict of its own. Those counts are git's `--numstat` minus
+whatever cx skipped. `--verbose` adds the rest:
 
 ```console
 $ cx --verbose
@@ -53,7 +52,7 @@ cx       [-n <N>] [--base <ref>] [--staged]   # overview: one merged table — t
 cx diff  [-n <N>] [--base <ref>] [--staged]   # just the diff, sized by review cost
 cx abs   [-n <N>]                             # absolute C(tree): the trend-line number
 
-# every view: [-v|--verbose] [--no-files] [--ignore-tests] [--json]
+# any of the above: [-v|--verbose] [--no-files] [--ignore-tests] [--json]
 ```
 
 Defaults can be pinned through the environment — `CX_IGNORE_TESTS=1`,
@@ -65,9 +64,9 @@ The tree breakdown is dust-style: contributions aggregate up the
 directory tree, only the `-n` globally biggest files/directories are
 shown (default 30), and everything pruned collapses into a per-directory
 `… +N more` row — so the view stays one screen even on repos with
-thousands of files. `--no-files` suppresses the breakdown, leaving the
-footer alone (on `cx` and `cx abs` it also skips computing it entirely).
-Output colorizes on a terminal and degrades to plain text when piped.
+thousands of files. `--no-files` suppresses the breakdown and, on `cx`
+and `cx abs`, skips computing it entirely. Output colorizes on a
+terminal and degrades to plain text when piped.
 
 `--json` emits the full report (per-file scores, skipped files, totals,
 scale factors, compressor version) — the stable contract for tooling.

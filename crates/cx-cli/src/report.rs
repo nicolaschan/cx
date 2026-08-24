@@ -9,19 +9,17 @@ use crate::breakdown::{self, Entry, Node};
 use crate::git::Status;
 use crate::pipeline::{AbsReport, DiffFile, DiffReport, VersionInfo};
 
-/// What a view includes, and whether it may say it in color. Rendering
-/// reads nothing else about its surroundings, so the same report renders
-/// the same bytes wherever it runs.
+/// What a view includes, and whether it may say it in color — an input,
+/// not something the renderer reads off the process it runs in, so the
+/// same report renders the same bytes wherever it runs.
 #[derive(Clone, Copy)]
 pub struct Options {
-    /// Show only the N biggest files/directories in the breakdown.
+    /// Only the N biggest files/directories in the breakdown.
     pub top: usize,
-    /// Emit the per-file breakdown at all.
     pub files: bool,
-    /// Emit the footer's detail lines.
+    /// The footer's detail lines.
     pub verbose: bool,
-    /// Is the output a terminal? Applied to tables and footer alike, so
-    /// a run colors everything or nothing.
+    /// Tables and footer alike: a run colors everything or nothing.
     pub color: bool,
 }
 
@@ -41,8 +39,7 @@ impl Options {
         self.paint(text, Some(Color::DarkGrey))
     }
 
-    /// A `label value` pair: the label recedes so the eye lands on the
-    /// number, which carries the magnitude color.
+    /// A `label value` pair: the label dim, the value carrying the color.
     fn stat(self, label: &str, value: String, color: Option<Color>) -> String {
         format!("{} {}", self.dim(label), self.paint(value, color))
     }
@@ -240,9 +237,9 @@ fn view<'a>(
     format!("{table}\n\n{footer}")
 }
 
-/// Everything under the table: one summary line, always shown, and the
-/// details `--verbose` adds. Whichever reports a view holds fold in
-/// here, so what two views share is written and emitted once.
+/// Everything under the table: one summary line, plus the details
+/// `--verbose` adds. Every view folds in here, so what they share is
+/// written once.
 fn footer(
     opts: Options,
     version: &VersionInfo,
@@ -253,7 +250,7 @@ fn footer(
     let mut details = Vec::new();
     if let Some(abs) = abs {
         // C(tree) is a whole-repo absolute, not a change: no magnitude
-        // color, which would sit permanently red.
+        // color (it would sit permanently red).
         summary.push(opts.stat("C(tree)", fmt_bytes(abs.compressed_bytes as f64), None));
         details.push(opts.dim(format!(
             "C(tree) over {} files ({} raw)",
@@ -306,8 +303,8 @@ fn footer(
 }
 
 /// The attribution noise gauge, colored by whether per-item numbers can
-/// be trusted at all. It covers every pass the view merged, reporting
-/// the worst: one bad pass makes every per-item number in it suspect.
+/// be trusted at all. It reports the worst of every pass the view
+/// merged: one bad pass makes every per-item number in it suspect.
 fn scale_gauge(opts: Options, abs: Option<&AbsReport>, diff: Option<&DiffReport>) -> String {
     let scales = diff
         .into_iter()

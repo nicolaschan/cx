@@ -98,8 +98,8 @@ impl Git {
         Ok(split_nul(&out))
     }
 
-    /// One `git diff` of the scored range, NUL-split. Shared so the
-    /// listings below describe the same diff, renames included.
+    /// Shared so both listings below describe the same diff, renames
+    /// included.
     fn diff(&self, format: &str, from: &str, staged: bool) -> Result<Vec<String>> {
         let mut args = vec!["diff", format, "-z", "--find-renames"];
         if staged {
@@ -154,8 +154,7 @@ impl Git {
         Ok(changes)
     }
 
-    /// Lines (added, deleted) per path, as `git diff --numstat` counts
-    /// them, keyed the way [`Git::changes`] keys a rename: by destination.
+    /// Lines (added, deleted) per path, keyed as [`Git::changes`] keys them.
     pub fn line_counts(&self, from: &str, staged: bool) -> Result<HashMap<String, (u64, u64)>> {
         // `-` for a binary file, which the filter drops before summing.
         let count = |s: &str| s.parse().unwrap_or(0);
