@@ -2,8 +2,10 @@
 //! behavioral claim about the metrics, not about zstd internals; if one
 //! fails after a zstd upgrade, the metric semantics regressed.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use cx_core::testgen::code as gen_code;
-use cx_core::{Scorer, rescale};
+use cx_core::{Progress, SEPARATOR, Scorer, Silent};
 
 fn scorer() -> Scorer {
     Scorer::default()
@@ -18,19 +20,32 @@ fn pure_move_is_free() {
     let other = gen_code(2, 100);
     let old_tree = s.assemble(&[&moved, &other]);
 
-    let review = s.score_sequential(&old_tree, &[&moved]);
+    let review = s.score(&old_tree, &moved);
     assert!(
-        review[0] < 64,
-        "moving known content should be ≈ free, got {}",
-        review[0]
+        review < 64,
+        "moving known content should be ≈ free, got {review}"
     );
 
     // Same computation twice: this can only fail on nondeterminism, which
     // is exactly the property Δ = 0 for pure moves rests on.
     let remainder = s.assemble(&[&other]);
-    let first_run = s.score_sequential(&remainder, &[&moved]);
-    let second_run = s.score_sequential(&remainder, &[&moved]);
-    assert_eq!(first_run, second_run, "scoring must be deterministic");
+    assert_eq!(
+        s.score(&remainder, &moved),
+        s.score(&remainder, &moved),
+        "scoring must be deterministic"
+    );
+}
+
+/// zstd compresses differently when a prefix happens to sit right before
+/// its input in memory; the scorer pins one behavior, so a score is a
+/// function of bytes alone, wherever they live.
+#[test]
+fn scores_do_not_depend_on_memory_layout() {
+    let s = scorer();
+    let (reference, input) = (gen_code(3, 200), gen_code(4, 50));
+    let adjacent = [reference.as_slice(), input.as_slice()].concat();
+    let (prefix, rest) = adjacent.split_at(reference.len());
+    assert_eq!(s.score(prefix, rest), s.score(&reference, &input));
 }
 
 /// A full rewrite of equal intrinsic complexity: review cost stays high
@@ -45,11 +60,11 @@ fn equal_complexity_rewrite() {
     let other = gen_code(30, 200);
 
     let old_tree = s.assemble(&[&old, &other]);
-    let review = s.score_sequential(&old_tree, &[&new])[0];
+    let review = s.score(&old_tree, &new);
 
     let remainder = s.assemble(&[&other]);
-    let c_new = s.score_sequential(&remainder, &[&new])[0];
-    let c_old = s.score_sequential(&remainder, &[&old])[0];
+    let c_new = s.score(&remainder, &new);
+    let c_old = s.score(&remainder, &old);
     let delta = c_new as i64 - c_old as i64;
 
     assert!(
@@ -74,14 +89,14 @@ fn deletion_refunds() {
 
     // Remainder still contains two more copies of `dup`.
     let remainder_with_copies = s.assemble(&[&dup, &dup, &other]);
-    let refund_dup = s.score_sequential(&remainder_with_copies, &[&dup])[0];
+    let refund_dup = s.score(&remainder_with_copies, &dup);
     assert!(
         refund_dup < 64,
         "deleting 1-of-3 copies should refund ≈ 0, got {refund_dup}"
     );
 
     let remainder_plain = s.assemble(&[&other]);
-    let refund_unique = s.score_sequential(&remainder_plain, &[&unique])[0];
+    let refund_unique = s.score(&remainder_plain, &unique);
     assert!(
         refund_unique > 500,
         "deleting unique content should refund its full cost, got {refund_unique}"
@@ -96,8 +111,11 @@ fn repeated_new_patterns_charged_once() {
     let pattern = gen_code(70, 100);
     let reference = s.assemble(&[&gen_code(80, 100)]);
 
-    let first = s.score_sequential(&reference, &[&pattern])[0];
-    let scores = s.score_sequential(&reference, &[&pattern, &pattern, &pattern, &pattern]);
+    let first = s.score(&reference, &pattern);
+    let scored = s
+        .attribution(&reference, &[pattern.as_slice(); 4])
+        .run(&Silent);
+    let scores: Vec<u64> = scored.scores.iter().map(|sc| sc.raw).collect();
     let total: u64 = scores.iter().sum();
 
     assert_eq!(scores[0], first);
@@ -110,6 +128,29 @@ fn repeated_new_patterns_charged_once() {
     );
 }
 
+/// The chain rule, item by item: each attributed score is the score of
+/// that item alone against the explicit prefix it was conditioned on —
+/// however the run is scheduled. Repeats sit at different positions so
+/// the near-free scores land only where the pattern already appeared.
+#[test]
+fn attributed_scores_are_per_item_conditionals() {
+    let s = scorer();
+    let reference = s.assemble(&[&gen_code(200, 150)]);
+    let (a, b, c) = (gen_code(301, 60), gen_code(302, 90), gen_code(303, 40));
+    let items: [&[u8]; 5] = [&a, &b, &a, &c, &b];
+
+    let scored = s.attribution(&reference, &items).run(&Silent);
+    let seq: Vec<u64> = scored.scores.iter().map(|sc| sc.raw).collect();
+    for (i, item) in items.iter().enumerate() {
+        let mut prefix = reference.clone();
+        prefix.extend_from_slice(&s.assemble(&items[..i]));
+        assert_eq!(seq[i], s.score(&prefix, item), "item {i}");
+    }
+    assert_eq!(scored.joint, s.score(&reference, &s.assemble(&items)));
+    assert!(seq[2] < 64 && seq[4] < 64, "repeats ride free: {seq:?}");
+    assert!(seq[0] > 500 && seq[1] > 500 && seq[3] > 300, "{seq:?}");
+}
+
 /// ΣΔᵢ ≈ joint total (per-frame overhead and greedy matching make the sum
 /// run slightly high); the rescale factor is the noise gauge and rescaled
 /// scores sum exactly to the joint.
@@ -120,18 +161,53 @@ fn sequential_sum_tracks_joint() {
     let refs: Vec<&[u8]> = items.iter().map(|v| v.as_slice()).collect();
     let reference = s.assemble(&[&gen_code(90, 200)]);
 
-    let seq = s.score_sequential(&reference, &refs);
-    let joint = s.score_joint(&reference, &refs);
-    let rescaled = rescale(&seq, joint);
-
+    let scored = s.attribution(&reference, &refs).run(&Silent);
     assert!(
-        (0.7..=1.1).contains(&rescaled.scale),
+        (0.7..=1.1).contains(&scored.scale),
         "scale factor should be near 1, got {}",
-        rescaled.scale
+        scored.scale
     );
-    let sum: f64 = rescaled.scores.iter().map(|sc| sc.rescaled).sum();
+    let sum: f64 = scored.scores.iter().map(|sc| sc.rescaled).sum();
     assert!(
-        (sum - joint as f64).abs() < 1e-6 * joint as f64,
-        "rescaled scores must sum to joint: {sum} vs {joint}"
+        (sum - scored.joint as f64).abs() < 1e-6 * scored.joint as f64,
+        "rescaled scores must sum to joint: {sum} vs {}",
+        scored.joint
     );
+}
+
+#[derive(Default)]
+struct Counter(AtomicU64);
+
+impl Progress for Counter {
+    fn advance(&self, bytes: u64) {
+        self.0.fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
+/// A run's planned cost is what a progress bar is sized to, so it must
+/// be what the run reports — and it must mean what it says: every item
+/// indexes its prefix and compresses itself, the joint does the same for
+/// all items at once. More items than threads, so workers take turns.
+#[test]
+fn progress_advances_by_exactly_the_planned_cost() {
+    let s = scorer();
+    let reference = s.assemble(&[&gen_code(400, 100)]);
+    let items: Vec<Vec<u8>> = (0..40).map(|i| gen_code(500 + i, 5)).collect();
+    let refs: Vec<&[u8]> = items.iter().map(|v| v.as_slice()).collect();
+    let plan = s.attribution(&reference, &refs);
+
+    let prefix = |i: usize| {
+        reference.len()
+            + refs[..i]
+                .iter()
+                .map(|r| r.len() + SEPARATOR.len())
+                .sum::<usize>()
+    };
+    let items_cost: usize = (0..refs.len()).map(|i| prefix(i) + refs[i].len()).sum();
+    let joint_cost = reference.len() + s.assemble(&refs).len();
+    assert_eq!(plan.cost(), (items_cost + joint_cost) as u64);
+
+    let counter = Counter::default();
+    plan.run(&counter);
+    assert_eq!(counter.0.into_inner(), plan.cost());
 }

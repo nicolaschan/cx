@@ -67,6 +67,13 @@ thousands of files. `--no-files` suppresses the breakdown, leaving the
 footer alone (on `cx` and `cx abs` it also skips computing it entirely).
 Output colorizes on a terminal and degrades to plain text when piped.
 
+Scoring uses every core: each file's compression is independent of the
+others' results, so they run in parallel across all logical CPUs
+(`RAYON_NUM_THREADS` caps the count; budget ~85 MB per thread). While it
+runs, a progress bar on stderr — sized by the bytes zstd has left to
+index, so its ETA tracks wall-clock — shows where the run is; it appears
+only when stderr is a terminal.
+
 `--json` emits the full report (per-file scores, skipped files, totals,
 scale factors, compressor version) — the stable contract for tooling.
 

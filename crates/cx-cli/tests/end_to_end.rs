@@ -8,6 +8,7 @@ use std::process::Command;
 
 use cx_cli::git::{Git, Status};
 use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::progress::Progress;
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -64,7 +65,7 @@ fn setup() -> (tempfile::TempDir, Git) {
 #[test]
 fn scores_a_realistic_branch() {
     let (_dir, git) = setup();
-    let report = pipeline::diff(&git, &DiffOptions::default()).unwrap();
+    let report = pipeline::diff(&git, &DiffOptions::default(), Progress::hidden()).unwrap();
 
     let by_path = |p: &str| {
         report
@@ -135,6 +136,7 @@ fn ignoring_tests_drops_their_cost_and_leaves_the_rest() {
                 ignore_tests,
                 ..Default::default()
             },
+            Progress::hidden(),
         )
         .unwrap()
     };
@@ -224,6 +226,7 @@ fn staged_mode_scores_the_index() {
             staged: true,
             ..Default::default()
         },
+        Progress::hidden(),
     )
     .unwrap();
     let staged = report.files.iter().find(|f| f.path == "src/staged.rs");
@@ -236,7 +239,7 @@ fn staged_mode_scores_the_index() {
 #[test]
 fn tree_reports_absolute_complexity_with_contributions() {
     let (_dir, git) = setup();
-    let report = pipeline::abs(&git, &AbsOptions::default()).unwrap();
+    let report = pipeline::abs(&git, &AbsOptions::default(), Progress::hidden()).unwrap();
     // keep.rs + moved.rs + novel.rs + tests/novel_test.rs;
     // Cargo.lock and logo.png excluded.
     assert_eq!(report.file_count, 4, "kept files at HEAD");
@@ -266,6 +269,7 @@ fn tree_contributions_are_suppressable() {
             no_files: true,
             ..Default::default()
         },
+        Progress::hidden(),
     )
     .unwrap();
     assert_eq!(report.file_count, 4);

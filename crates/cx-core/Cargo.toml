@@ -7,4 +7,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-zstd-safe = { version = "7", features = ["std"] }
+rayon = "1.12"
+zstd-safe = { version = "7", features = ["experimental", "std"] }

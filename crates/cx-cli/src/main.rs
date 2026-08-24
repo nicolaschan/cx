@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use cx_cli::git::Git;
 use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::progress::Progress;
 use cx_cli::report;
 
 /// Score git trees and diffs by marginal description length: how much
@@ -82,6 +83,12 @@ impl CommonArgs {
         }
     }
 
+    /// Progress draws on stderr only while stderr is a terminal — decided
+    /// here, like color for stdout, never sniffed by the drawer.
+    fn progress(&self) -> Progress {
+        Progress::new(std::io::stderr().is_terminal())
+    }
+
     /// The one place that asks where the output is going: the renderer
     /// takes the answer as an input rather than sniffing it itself.
     fn report_options(&self) -> report::Options {
@@ -134,8 +141,8 @@ fn main() -> Result<()> {
     match cli.cmd {
         None => {
             let common = cli.common;
-            let abs = pipeline::abs(&git, &common.abs_options())?;
-            let diff = pipeline::diff(&git, &cli.diff.options(&common))?;
+            let abs = pipeline::abs(&git, &common.abs_options(), common.progress())?;
+            let diff = pipeline::diff(&git, &cli.diff.options(&common), common.progress())?;
             emit(
                 common.json,
                 &serde_json::json!({ "abs": abs, "diff": diff }),
@@ -150,7 +157,7 @@ fn main() -> Result<()> {
             if matches!(granularity, Granularity::Hunk) {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
-            let report = pipeline::diff(&git, &diff.options(&common))?;
+            let report = pipeline::diff(&git, &diff.options(&common), common.progress())?;
             emit(
                 common.json,
                 &report,
@@ -158,7 +165,7 @@ fn main() -> Result<()> {
             )?;
         }
         Some(Cmd::Abs { common }) => {
-            let report = pipeline::abs(&git, &common.abs_options())?;
+            let report = pipeline::abs(&git, &common.abs_options(), common.progress())?;
             emit(
                 common.json,
                 &report,
