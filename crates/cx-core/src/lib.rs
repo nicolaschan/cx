@@ -120,7 +120,7 @@ impl Scorer {
             max_window_log,
             empty_frame: 0,
         };
-        scorer.empty_frame = scorer.compressed_size(&mut CCtx::create(), &[], &[]);
+        scorer.empty_frame = scorer.compress(&mut CCtx::create(), &[], &[]);
         scorer
     }
 
@@ -148,7 +148,7 @@ impl Scorer {
         let grown: usize = items.iter().map(|i| i.len() + SEPARATOR.len()).sum();
         let mut buffer = Vec::with_capacity(reference.len() + grown);
         buffer.extend_from_slice(reference);
-        let items = items
+        let mut inputs: Vec<Range<usize>> = items
             .iter()
             .map(|item| {
                 let start = buffer.len();
@@ -157,20 +157,15 @@ impl Scorer {
                 start..start + item.len()
             })
             .collect();
+        inputs.push(reference.len()..buffer.len());
         Attribution {
             scorer: self,
             buffer,
-            reference_len: reference.len(),
-            items,
+            inputs,
         }
     }
 
-    fn compress<'a>(&self, cctx: &mut CCtx<'a>, reference: &'a [u8], input: &[u8]) -> u64 {
-        self.compressed_size(cctx, reference, input)
-            .saturating_sub(self.empty_frame)
-    }
-
-    fn compressed_size<'a>(&self, cctx: &mut CCtx<'a>, prefix: &'a [u8], input: &[u8]) -> u64 {
+    fn compress<'a>(&self, cctx: &mut CCtx<'a>, prefix: &'a [u8], input: &[u8]) -> u64 {
         let set = |cctx: &mut CCtx, p| {
             cctx.set_parameter(p).expect("static zstd parameter");
         };
@@ -197,7 +192,7 @@ impl Scorer {
         let written = cctx
             .compress2(&mut out, input)
             .unwrap_or_else(|c| panic!("zstd compress2: {}", zstd_safe::get_error_name(c)));
-        written as u64
+        (written as u64).saturating_sub(self.empty_frame)
     }
 
     /// Smallest window covering the whole reference + input, clamped to
@@ -209,55 +204,30 @@ impl Scorer {
 }
 
 /// One attribution's compressions, over a single buffer:
-/// `reference ++ item₀ ++ SEP ++ item₁ ++ SEP …`. Item i is scored
-/// against everything before it (the chain rule: a pattern repeated
-/// across items is charged to its first occurrence), and all items
-/// jointly against the reference. No compression reads another's
+/// `reference ++ item₀ ++ SEP ++ item₁ ++ SEP …`. Each input is scored
+/// against everything before it in the buffer: item i against the
+/// reference and earlier items (the chain rule: a pattern repeated
+/// across items is charged to its first occurrence), and last, all
+/// items jointly against the reference. No compression reads another's
 /// result, so they all run at once.
 pub struct Attribution<'s> {
     scorer: &'s Scorer,
     buffer: Vec<u8>,
-    reference_len: usize,
-    items: Vec<Range<usize>>,
-}
-
-/// One compression: `buffer[input]` against `buffer[..prefix_end]`.
-struct Job {
-    prefix_end: usize,
-    input: Range<usize>,
-    slot: Slot,
-}
-
-enum Slot {
-    Item(usize),
-    Joint,
-}
-
-impl Job {
-    /// Bytes zstd indexes and compresses.
-    fn cost(&self) -> u64 {
-        (self.prefix_end + self.input.len()) as u64
-    }
+    inputs: Vec<Range<usize>>,
 }
 
 impl Attribution<'_> {
-    fn jobs(&self) -> impl Iterator<Item = Job> + '_ {
-        let items = self.items.iter().enumerate().map(|(i, item)| Job {
-            prefix_end: item.start,
-            input: item.clone(),
-            slot: Slot::Item(i),
-        });
-        items.chain([Job {
-            prefix_end: self.reference_len,
-            input: self.reference_len..self.buffer.len(),
-            slot: Slot::Joint,
-        }])
+    /// Bytes zstd indexes and compresses for `input`: its prefix plus
+    /// itself.
+    fn cost_of(input: &Range<usize>) -> u64 {
+        input.end as u64
     }
 
-    /// Total [`Job::cost`] over every job: the unit progress advances
-    /// in, so a bar over it tracks wall-clock rather than item count.
+    /// Total [`cost_of`](Self::cost_of) over every input: the unit
+    /// progress advances in, so a bar over it tracks wall-clock rather
+    /// than item count.
     pub fn cost(&self) -> u64 {
-        self.jobs().map(|job| job.cost()).sum()
+        self.inputs.iter().map(Self::cost_of).sum()
     }
 
     pub fn run(&self, progress: &dyn Progress) -> Rescaled {
@@ -274,19 +244,18 @@ pub fn run_all<const N: usize>(
     plans: [&Attribution<'_>; N],
     progress: &dyn Progress,
 ) -> [Rescaled; N] {
-    let mut jobs: Vec<(usize, Job)> = plans
-        .iter()
-        .enumerate()
-        .flat_map(|(p, plan)| plan.jobs().map(move |job| (p, job)))
+    let mut jobs: Vec<(usize, usize)> = (0..N)
+        .flat_map(|p| (0..plans[p].inputs.len()).map(move |i| (p, i)))
         .collect();
-    jobs.sort_by_key(|(_, job)| Reverse(job.cost()));
+    jobs.sort_by_key(|&(p, i)| Reverse(Attribution::cost_of(&plans[p].inputs[i])));
 
     let contexts = Mutex::new(Vec::new());
-    let sizes: Vec<u64> = jobs
+    let scored: Vec<u64> = jobs
         .par_iter()
         .with_max_len(1)
-        .map(|(p, job)| {
-            let plan = plans[*p];
+        .map(|&(p, i)| {
+            let plan = plans[p];
+            let input = &plan.inputs[i];
             let mut cctx = contexts
                 .lock()
                 .expect("pool")
@@ -294,24 +263,23 @@ pub fn run_all<const N: usize>(
                 .unwrap_or_else(CCtx::create);
             let size = plan.scorer.compress(
                 &mut cctx,
-                &plan.buffer[..job.prefix_end],
-                &plan.buffer[job.input.clone()],
+                &plan.buffer[..input.start],
+                &plan.buffer[input.clone()],
             );
             contexts.lock().expect("pool").push(cctx);
-            progress.advance(job.cost());
+            progress.advance(Attribution::cost_of(input));
             size
         })
         .collect();
 
-    let mut raw = plans.map(|plan| vec![0; plan.items.len()]);
-    let mut joint = [0; N];
-    for ((p, job), size) in jobs.iter().zip(sizes) {
-        match job.slot {
-            Slot::Item(i) => raw[*p][i] = size,
-            Slot::Joint => joint[*p] = size,
-        }
+    let mut sizes = plans.map(|plan| vec![0; plan.inputs.len()]);
+    for (&(p, i), size) in jobs.iter().zip(scored) {
+        sizes[p][i] = size;
     }
-    std::array::from_fn(|p| rescale(&raw[p], joint[p]))
+    sizes.map(|sizes| {
+        let (joint, raw) = sizes.split_last().expect("the joint");
+        rescale(raw, *joint)
+    })
 }
 
 #[cfg(test)]
