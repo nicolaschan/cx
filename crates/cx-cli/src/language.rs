@@ -17,26 +17,25 @@ const NOWHERE: &str = "/\0";
 
 /// Interpreters a shebang may name, by the name they go by there. Not an
 /// extension lookup: `m4` is not ObjectiveC's `.m`, `v` is not Coq's `.v`.
-const INTERPRETERS: &[(&str, LanguageType)] = &[
-    ("sh", LanguageType::Sh),
-    ("bash", LanguageType::Bash),
-    ("zsh", LanguageType::Zsh),
-    ("ksh", LanguageType::Ksh),
-    ("fish", LanguageType::Fish),
-    ("csh", LanguageType::CShell),
-    ("tcsh", LanguageType::CShell),
-    ("dash", LanguageType::Sh),
-    ("ash", LanguageType::Sh),
-    ("python", LanguageType::Python),
-    ("perl", LanguageType::Perl),
-    ("ruby", LanguageType::Ruby),
-    ("node", LanguageType::JavaScript),
-    ("lua", LanguageType::Lua),
-    ("php", LanguageType::Php),
-    ("awk", LanguageType::AWK),
-    ("raku", LanguageType::Raku),
-    ("perl6", LanguageType::Raku),
-];
+fn by_name(interpreter: &str) -> Option<LanguageType> {
+    Some(match interpreter {
+        "sh" | "dash" | "ash" => LanguageType::Sh,
+        "bash" => LanguageType::Bash,
+        "zsh" => LanguageType::Zsh,
+        "ksh" => LanguageType::Ksh,
+        "fish" => LanguageType::Fish,
+        "csh" | "tcsh" => LanguageType::CShell,
+        "python" => LanguageType::Python,
+        "perl" => LanguageType::Perl,
+        "ruby" => LanguageType::Ruby,
+        "node" => LanguageType::JavaScript,
+        "lua" => LanguageType::Lua,
+        "php" => LanguageType::Php,
+        "awk" => LanguageType::AWK,
+        "raku" | "perl6" => LanguageType::Raku,
+        _ => return None,
+    })
+}
 
 pub fn of(path: &str, content: &[u8]) -> Option<LanguageType> {
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -48,25 +47,16 @@ pub fn of(path: &str, content: &[u8]) -> Option<LanguageType> {
 fn from_shebang(content: &[u8]) -> Option<LanguageType> {
     let first_line = content.strip_prefix(b"#!")?.split(|&b| b == b'\n').next()?;
     let mut words = std::str::from_utf8(first_line).ok()?.split_whitespace();
-    let program = words.next()?;
-    let program = match program.rsplit('/').next()? {
-        "env" => words.find(|w| !w.starts_with('-'))?,
-        program => program,
+    let program = words.next()?.rsplit('/').next()?;
+    let program = if program == "env" {
+        words.find(|w| !w.starts_with('-'))?
+    } else {
+        program
     };
-    // "perl6" is Raku, not a versioned perl: exact name before trimmed.
-    by_name(program).or_else(|| by_name(without_version(program)))
-}
-
-/// `python3.11` → `python`.
-fn without_version(interpreter: &str) -> &str {
-    interpreter.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
-}
-
-fn by_name(interpreter: &str) -> Option<LanguageType> {
-    INTERPRETERS
-        .iter()
-        .find(|(name, _)| *name == interpreter)
-        .map(|(_, lang)| *lang)
+    // `python3.11` -> `python`. "perl6" is Raku, not a versioned perl: exact
+    // name before trimmed.
+    let trimmed = program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    by_name(program).or_else(|| by_name(trimmed))
 }
 
 #[cfg(test)]

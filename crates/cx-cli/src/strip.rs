@@ -31,20 +31,11 @@ struct Syntax {
     doc: &'static [(&'static str, &'static str)],
 }
 
-/// What a token at the current position opens.
+/// A comment or string that swallows bytes until a closing token (or, for
+/// `Line`, a newline). `Block` and `Str` also serve as the token an
+/// opener at the start of `Code` resolves to; `Block`'s `depth` starts at
+/// 1 there and only changes once inside the comment.
 #[derive(Clone, Copy)]
-enum Opener {
-    Line,
-    Block {
-        open: Option<&'static str>,
-        close: &'static str,
-    },
-    Str {
-        close: &'static str,
-        verbatim: bool,
-    },
-}
-
 enum State {
     Code,
     Line,
@@ -74,44 +65,46 @@ impl Syntax {
         })
     }
 
-    /// The longest opener starting at `rest`, so `"""` beats `"` and
-    /// `r#"` beats `"`. A doc-quote is a comment only at the start of a
-    /// statement; elsewhere it's just a (longer) string quote. On a tie,
-    /// a comment beats a string quote (checked first, kept on equal
-    /// length) — swallowing one line wrong is cheaper than swallowing
-    /// the rest of the file.
-    fn opener_at(&self, rest: &[u8], statement_start: bool) -> Option<(usize, Opener)> {
-        let mut best: Option<(usize, Opener)> = None;
-        let mut consider = |token: &'static str, opener: Opener| {
+    /// The state entered by the longest opener starting at `rest`, so
+    /// `"""` beats `"` and `r#"` beats `"`. A doc-quote is a comment only
+    /// at the start of a statement; elsewhere it's just a (longer)
+    /// string quote. On a tie, a comment beats a string quote (checked
+    /// first, kept on equal length) — swallowing one line wrong is
+    /// cheaper than swallowing the rest of the file.
+    fn opener_at(&self, rest: &[u8], statement_start: bool) -> Option<(usize, State)> {
+        let mut best: Option<(usize, State)> = None;
+        let mut consider = |token: &'static str, state: State| {
             if rest.starts_with(token.as_bytes()) && best.is_none_or(|(len, _)| token.len() > len) {
-                best = Some((token.len(), opener));
+                best = Some((token.len(), state));
             }
         };
         for &t in self.line {
-            consider(t, Opener::Line);
+            consider(t, State::Line);
         }
         for &(o, c) in self.block {
             consider(
                 o,
-                Opener::Block {
+                State::Block {
                     open: self.nested.then_some(o),
                     close: c,
+                    depth: 1,
                 },
             );
         }
         for &(o, c) in self.nested_block {
             consider(
                 o,
-                Opener::Block {
+                State::Block {
                     open: Some(o),
                     close: c,
+                    depth: 1,
                 },
             );
         }
         for &(o, c) in self.quotes {
             consider(
                 o,
-                Opener::Str {
+                State::Str {
                     close: c,
                     verbatim: false,
                 },
@@ -120,25 +113,26 @@ impl Syntax {
         for &(o, c) in self.verbatim {
             consider(
                 o,
-                Opener::Str {
+                State::Str {
                     close: c,
                     verbatim: true,
                 },
             );
         }
         for &(o, c) in self.doc {
-            let opener = if statement_start {
-                Opener::Block {
+            let state = if statement_start {
+                State::Block {
                     open: None,
                     close: c,
+                    depth: 1,
                 }
             } else {
-                Opener::Str {
+                State::Str {
                     close: c,
                     verbatim: false,
                 }
             };
-            consider(o, opener);
+            consider(o, state);
         }
         best
     }
@@ -151,21 +145,15 @@ impl Syntax {
             let rest = &src[i..];
             match state {
                 State::Code => match self.opener_at(rest, out.statement_start) {
-                    Some((len, Opener::Line)) => {
-                        state = State::Line;
-                        i += len;
-                    }
-                    Some((len, Opener::Block { open, close })) => {
-                        state = State::Block {
-                            open,
-                            close,
-                            depth: 1,
-                        };
-                        i += len;
-                    }
-                    Some((len, Opener::Str { close, verbatim })) => {
+                    // A string's delimiter is code, so it's kept; a
+                    // comment's is not.
+                    Some((len, entered @ State::Str { .. })) => {
                         out.push(&rest[..len]);
-                        state = State::Str { close, verbatim };
+                        state = entered;
+                        i += len;
+                    }
+                    Some((len, entered)) => {
+                        state = entered;
                         i += len;
                     }
                     None => {

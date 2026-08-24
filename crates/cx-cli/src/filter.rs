@@ -88,7 +88,7 @@ fn is_prose(path: &str, content: &[u8]) -> bool {
         Some(lang) => PROSE_LANGUAGES.contains(&lang),
         None => {
             let file = path.rsplit('/').next().unwrap_or(path);
-            let stem = file.split(['.', '-', '_']).next().unwrap_or(file);
+            let stem = file.split(SEPARATORS).next().unwrap_or(file);
             PROSE_FILENAMES.iter().any(|n| stem.eq_ignore_ascii_case(n))
         }
     }
