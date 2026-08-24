@@ -322,7 +322,7 @@ fn tree_contributions_are_suppressable() {
         &git,
         &AbsOptions {
             no_files: true,
-            side: side,
+            side,
             ..Default::default()
         },
         Progress::default(),
