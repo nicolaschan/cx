@@ -12,15 +12,15 @@ Two independent axes per file, one PR total:
 - **REVIEW** — `C(new | old tree)`: what a reviewer who knows the codebase
   must newly absorb. Repo-conventional plumbing compresses to ≈ 0 even when
   it spans hundreds of lines; a dense 60-line contract change does not.
-- **ΔC** — `C(new | remainder) − C(old | remainder)`, where the
+- **ΔCX** — `C(new | remainder) − C(old | remainder)`, where the
   remainder is the tree minus all touched content: how much complexity the
   change adds to (or refunds from) the codebase. A full rewrite of equal
-  intrinsic complexity scores REVIEW high, Δ ≈ 0. Deleting one of N
+  intrinsic complexity scores REVIEW high, ΔCX ≈ 0. Deleting one of N
   duplicated copies refunds ≈ 0; deleting unique content refunds in full.
 
 ```console
 $ cx diff
- REVIEW  ΔC          LINES  PATH                     SHARE
+ REVIEW  ΔCX         LINES  PATH                     SHARE
  4.1 KB  +3.6 KB      1206  ├─┬ crates               █████████░  93.0%
  4.1 KB  +3.6 KB      1206  │ └─┬ cx-cli             █████████░  93.0%
  1.5 KB  +1.2 KB       267  │   ├── report.rs        ███░░░░░░░  32.8%
@@ -28,7 +28,7 @@ $ cx diff
      ≈0  −5.0 KB  −      -  │   └── poller.rs        ░░░░░░░░░░   0.1%
  1.9 KB   +248 B        92  └── README.md            █░░░░░░░░░   9.5%
 
- review 4.4 KB   ΔC +3.9 KB   lines +1298 −431   1 skipped
+ review 4.4 KB   ΔCX +3.9 KB   lines +1298 −431   1 skipped
 ```
 
 The `+`/`−`/`→` column marks added, deleted, and renamed files (`⚠` for
@@ -41,28 +41,28 @@ whatever cx skipped. `--verbose` adds the rest:
 
 ```console
 $ cx --verbose
- C(tree) 23.4 KB   review 4.4 KB   ΔC +3.9 KB   lines +1298 −431   1 skipped
+ C(tree) 23.4 KB   review 4.4 KB   ΔCX +3.9 KB   lines +1298 −431   1 skipped
  C(tree) over 23 files (83.7 KB raw)
  skipped: Cargo.lock (generated/vendored pattern)
  zstd 1.5.7, level 19, window≤2^31
 ```
 
 ```
-cx       [-n <N>] [--base <ref>]  # overview: one merged table — tree breakdown plus the diff's ΔC per path
+cx       [-n <N>] [--base <ref>]  # overview: one merged table — tree breakdown plus the diff's ΔCX per path
 cx diff  [-n <N>] [--base <ref>]  # just the diff, sized by review cost
 cx abs   [-n <N>]                 # absolute C(tree): the trend-line number
 
-# any of the above: [--staged|--committed] [-v|--verbose] [--no-files] [--ignore-tests] [--json]
+# any of the above: [--staged|--committed] [-v|--verbose] [--no-files] [--include-tests] [--json]
 ```
 
 Every view scores the **working tree** by default — staged and unstaged
 changes, plus untracked files that aren't ignored. `--staged` scores the
 index; `--committed` scores HEAD. `abs` takes the same choice — `C(tree)`
-and `ΔC` describe the same snapshot.
+and `ΔCX` describe the same snapshot.
 
-Defaults can be pinned through the environment — `CX_IGNORE_TESTS=1`,
+Defaults can be pinned through the environment — `CX_INCLUDE_TESTS=1`,
 `CX_TOP=15`, `CX_BASE=develop` — and any single run can still override
-them on the command line (`--ignore-tests=false`, `-n 50`). `cx --help`
+them on the command line (`--include-tests=false`, `-n 50`). `cx --help`
 lists which variable backs each flag.
 
 The tree breakdown is dust-style: contributions aggregate up the
@@ -84,8 +84,9 @@ Files are filtered before scoring: `.gitattributes` linguist annotations,
 binary detection, common generated/vendored patterns (lockfiles, `dist/`,
 `vendor/`, minified assets…), and a `.cxignore` (gitignore syntax).
 
-`--ignore-tests` adds test files, recognised by naming convention
-alone — no language, build system, or parser. A path is a test when any
+Test files go too, recognised by naming convention alone — no language,
+build system, or parser. `--include-tests` scores them anyway, for the
+runs that want the whole picture. A path is a test when any
 segment of it, split on `/`, `_`, `-`, and `.`, is `test`, `tests`, or
 `spec`, or when a *directory* segment is `e2e`, `mocks`, or `testdata`.
 So `foo_test.go`, `foo-test.js`, `foo.test.ts`, `test_foo.py`,

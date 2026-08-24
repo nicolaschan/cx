@@ -191,7 +191,7 @@ fn view<'a>(
         return footer;
     }
     let columns: &[&str] = match diff_columns {
-        Some(bytes_header) => &[bytes_header, "ΔC", "", "LINES", "PATH", "SHARE"],
+        Some(bytes_header) => &[bytes_header, "ΔCX", "", "LINES", "PATH", "SHARE"],
         None => &["BYTES", "LINES", "PATH", "SHARE"],
     };
     let mut table = Table::new();
@@ -230,7 +230,7 @@ fn footer(
             summary.push(opts.dim(format!("no scorable changes against {}", diff.base)));
         } else {
             summary.push(opts.stat("review", fmt_bytes(review), score_color(review)));
-            summary.push(opts.stat("ΔC", fmt_signed(delta), score_color(delta)));
+            summary.push(opts.stat("ΔCX", fmt_signed(delta), score_color(delta)));
             let (added, deleted) = (diff.totals.added_lines, diff.totals.deleted_lines);
             summary.push(opts.stat("lines", format!("+{added} −{deleted}"), None));
         }
@@ -412,7 +412,7 @@ mod tests {
         color: false,
     };
     const SUMMARY: &str =
-        " C(tree) 10.0 KB   review 2.0 KB   ΔC +1.0 KB   lines +40 −12   1 skipped\n";
+        " C(tree) 10.0 KB   review 2.0 KB   ΔCX +1.0 KB   lines +40 −12   1 skipped\n";
 
     /// Everything the overview prints below its table.
     fn footer(abs: &AbsReport, diff: &DiffReport, opts: Options) -> String {
@@ -473,7 +473,7 @@ mod tests {
             format!(
                 " {grey}C(tree){reset} 10.0 KB   \
                  {grey}review{reset} {yellow}2.0 KB{reset}   \
-                 {grey}ΔC{reset} {yellow}+1.0 KB{reset}   \
+                 {grey}ΔCX{reset} {yellow}+1.0 KB{reset}   \
                  {grey}lines{reset} +40 −12   \
                  {grey}1 skipped{reset}\n"
             )

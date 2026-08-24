@@ -12,7 +12,7 @@ fn scorer() -> Scorer {
 }
 
 /// A pure move: the "new" content already exists verbatim in the reference.
-/// Review cost ≈ 0, and complexity Δ is exactly 0 by symmetry.
+/// Review cost ≈ 0, and complexity ΔCX is exactly 0 by symmetry.
 #[test]
 fn pure_move_is_free() {
     let s = scorer();
@@ -26,7 +26,7 @@ fn pure_move_is_free() {
     );
 
     // Same computation twice: this can only fail on nondeterminism, which
-    // is exactly the property Δ = 0 for pure moves rests on.
+    // is exactly the property ΔCX = 0 for pure moves rests on.
     assert_eq!(
         s.score(&[&other], &moved),
         s.score(&[&other], &moved),
@@ -46,7 +46,7 @@ fn scores_do_not_depend_on_memory_layout() {
 }
 
 /// A full rewrite of equal intrinsic complexity: review cost stays high
-/// (the reviewer must absorb all-new content) while complexity Δ ≈ 0
+/// (the reviewer must absorb all-new content) while complexity ΔCX ≈ 0
 /// (the codebase is no more complex than before). The two metrics are
 /// independent axes — this is why metric 1 is NOT a size subtraction.
 #[test]
@@ -67,7 +67,7 @@ fn equal_complexity_rewrite() {
     );
     assert!(
         (delta.abs() as f64) < 0.10 * c_new as f64,
-        "equal-complexity rewrite should have Δ ≈ 0: Δ={delta}, C(new)={c_new}"
+        "equal-complexity rewrite should have ΔCX ≈ 0: ΔCX={delta}, C(new)={c_new}"
     );
 }
 
