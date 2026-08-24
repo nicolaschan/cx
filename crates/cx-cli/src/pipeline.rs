@@ -441,9 +441,9 @@ fn resolve_base(git: &Git, requested: Option<&str>) -> Result<String> {
     bail!("no main/master branch found; pass --base <ref>")
 }
 
-/// Layer 5 of the filter stack: flag (never drop) files whose density is
-/// far off this run's median — probable generated/vendored content that
-/// no pattern anticipated.
+/// The density backstop of the filter stack (see `filter.rs`): flag
+/// (never drop) files whose density is far off this run's median —
+/// probable generated/vendored content that no pattern anticipated.
 fn flag_density_outliers(files: &mut [DiffFile]) {
     let mut densities: Vec<f64> = files
         .iter()
