@@ -51,7 +51,8 @@ cx       [-n <N>] [--base <ref>]  # overview: one merged table — tree breakdow
 cx diff  [-n <N>] [--base <ref>]  # just the diff, sized by review cost
 cx abs   [-n <N>]                 # absolute C(tree): the trend-line number
 
-# any of the above: [--staged|--committed] [-v|--verbose] [--no-files] [--ignore-tests] [--json]
+# any of the above: [--staged|--committed] [-v|--verbose] [--no-files]
+#                   [--comments] [--prose] [--ignore-tests] [--json]
 ```
 
 Every view scores the **working tree** by default — staged and unstaged
@@ -59,10 +60,11 @@ changes, plus untracked files that aren't ignored. `--staged` scores the
 index; `--committed` scores HEAD. `abs` takes the same choice — `C(tree)`
 and `ΔC` describe the same snapshot.
 
-Defaults can be pinned through the environment — `CX_IGNORE_TESTS=1`,
-`CX_TOP=15`, `CX_BASE=develop` — and any single run can still override
-them on the command line (`--ignore-tests=false`, `-n 50`). `cx --help`
-lists which variable backs each flag.
+Defaults can be pinned through the environment — `CX_COMMENTS=1`,
+`CX_PROSE=1`, `CX_IGNORE_TESTS=1`, `CX_TOP=15`, `CX_BASE=develop` — and
+any single run can still override them on the command line
+(`--comments=false`, `-n 50`). `cx --help` lists which variable backs
+each flag.
 
 The tree breakdown is dust-style: contributions aggregate up the
 directory tree, only the `-n` globally biggest files/directories are
@@ -80,9 +82,22 @@ files in one PR is charged once, at its first occurrence. Sums are robust;
 `--verbose`'s `attribution scale` line is the built-in noise gauge (≈ 1.0
 → trust per-file numbers, far off → trust totals).
 
+cx scores **code**. Before anything is compressed, every file is reduced
+to its code: comments are stripped and blank lines dropped, using
+[tokei](https://github.com/XAMPPRocky/tokei)'s per-language syntax table
+(line and block comment delimiters, nesting, string quotes — so a `//`
+inside a string literal stays) for the 300-odd languages it knows;
+anything else passes through untouched. A comment-only change then scores
+≈0 on both axes. `--comments` scores comments too.
+
+Prose files — Markdown, reStructuredText, plain text, AsciiDoc, Org, and
+extensionless documents such as `LICENSE`, `README`, `CHANGELOG` — are
+skipped entirely. `--prose` scores them. Data and markup (JSON, YAML,
+TOML, HTML, CSS) are code, not prose.
+
 Files are filtered before scoring: `.gitattributes` linguist annotations,
 binary detection, common generated/vendored patterns (lockfiles, `dist/`,
-`vendor/`, minified assets…), and a `.cxignore` (gitignore syntax).
+`vendor/`, minified assets…), prose, and a `.cxignore` (gitignore syntax).
 
 `--ignore-tests` adds test files, recognised by naming convention
 alone — no language, build system, or parser. A path is a test when any
