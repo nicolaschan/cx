@@ -36,7 +36,16 @@
           docker = pkgs.dockerTools.buildLayeredImage {
             name = "cx";
             tag = "latest";
-            config.Entrypoint = [ "${cx}/bin/cx" ];
+            contents = [ pkgs.git ];
+            config = {
+              Entrypoint = [ "${cx}/bin/cx" ];
+              WorkingDir = "/repo";
+              Env = [
+                "GIT_CONFIG_COUNT=1"
+                "GIT_CONFIG_KEY_0=safe.directory"
+                "GIT_CONFIG_VALUE_0=*"
+              ];
+            };
           };
         };
 

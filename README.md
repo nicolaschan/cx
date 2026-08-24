@@ -107,7 +107,7 @@ complexity against the codebase as it is.
 
 ```sh
 nix run github:nicolaschan/cx
-docker run -v "$PWD:/repo" -w /repo ghcr.io/nicolaschan/cx
+docker run --rm -v "$PWD:/repo" ghcr.io/nicolaschan/cx
 ```
 
 Prebuilt binaries for Linux (x86_64, aarch64) and macOS (aarch64) are
