@@ -9,7 +9,6 @@
 use std::path::Path;
 
 use anyhow::Result;
-use ignore::Match;
 use ignore::overrides::{Override, OverrideBuilder};
 
 pub struct Scope(Override);
@@ -35,19 +34,19 @@ impl Scope {
     /// in — while an include merely opens the directory, leaving the file
     /// free to be excluded deeper down. A scope holding any include
     /// rejects whatever none of them opened.
+    ///
+    /// Every candidate, the file included, is offered as a directory:
+    /// that is what keeps `Override` from reporting its
+    /// no-include-matched verdict as an exclude of its own.
     pub fn allows(&self, path: &str) -> bool {
         let dirs = path.match_indices('/').map(|(end, _)| &path[..end]);
         let mut opened = self.0.num_whitelists() == 0;
-        for candidate in dirs.chain(std::iter::once(path)) {
-            // Every candidate is offered as a directory: a file is the
-            // one a glob may still name outright, and asking about a
-            // directory is what keeps `Override` from reporting the
-            // no-include-matched verdict as an exclude of its own.
-            match self.0.matched(candidate, true) {
-                Match::Ignore(_) => return false,
-                Match::Whitelist(_) => opened = true,
-                Match::None => {}
+        for candidate in dirs.chain([path]) {
+            let verdict = self.0.matched(candidate, true);
+            if verdict.is_ignore() {
+                return false;
             }
+            opened |= verdict.is_whitelist();
         }
         opened
     }

@@ -195,21 +195,14 @@ fn serialize_status<S: serde::Serializer>(status: &Status, s: S) -> Result<S::Ok
 pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffReport> {
     let base = resolve_base(git, opts.base.as_deref())?;
     let merge_base = git.merge_base(&base, "HEAD")?;
-    let scope = Scope::new(git.root(), &opts.globs)?;
-
     // Scoping happens on the raw listings, before a blob is fetched: an
     // out-of-scope path is not in the reference, not scored, and not
     // skipped — it is simply not part of this run's repository.
-    let changes: Vec<_> = git
-        .changes(&merge_base, opts.side)?
-        .into_iter()
-        .filter(|c| scope.allows(&c.path))
-        .collect();
-    let tree_paths: Vec<String> = git
-        .ls_tree(&merge_base)?
-        .into_iter()
-        .filter(|p| scope.allows(p))
-        .collect();
+    let scope = Scope::new(git.root(), &opts.globs)?;
+    let mut changes = git.changes(&merge_base, opts.side)?;
+    changes.retain(|c| scope.allows(&c.path));
+    let mut tree_paths = git.ls_tree(&merge_base)?;
+    tree_paths.retain(|p| scope.allows(p));
     let tree_refs: Vec<&str> = tree_paths.iter().map(String::as_str).collect();
     let new_side_paths: Vec<&str> = changes
         .iter()
@@ -363,14 +356,11 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
 }
 
 pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport> {
-    let scope = Scope::new(git.root(), &opts.globs)?;
     // Scoped before the blobs are fetched: out of scope is out of the
     // repository, as far as this run is concerned.
-    let paths: Vec<String> = git
-        .list(opts.side)?
-        .into_iter()
-        .filter(|p| scope.allows(p))
-        .collect();
+    let scope = Scope::new(git.root(), &opts.globs)?;
+    let mut paths = git.list(opts.side)?;
+    paths.retain(|p| scope.allows(p));
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     let blobs = git.contents(opts.side, &path_refs)?;
     let attr_paths: Vec<String> = path_refs
