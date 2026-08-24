@@ -334,10 +334,10 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     // Churn over the same files the bytes above cover: a skipped file is
     // absent from `items` and so absent from this too.
     let churn = git.line_counts(&merge_base, opts.staged)?;
-    let (added_lines, deleted_lines) = items.iter().fold((0, 0), |(added, deleted), item| {
-        let count = churn.get(&item.path).copied().unwrap_or_default();
-        (added + count.added, deleted + count.deleted)
-    });
+    let (added_lines, deleted_lines) = items
+        .iter()
+        .filter_map(|item| churn.get(&item.path))
+        .fold((0, 0), |(a, d), (added, deleted)| (a + added, d + deleted));
 
     Ok(DiffReport {
         version: VersionInfo::for_scorer(&scorer),

@@ -27,13 +27,6 @@ pub struct Change {
     pub status: Status,
 }
 
-/// One path's line churn, as git counts it.
-#[derive(Clone, Copy, Default)]
-pub struct LineCount {
-    pub added: u64,
-    pub deleted: u64,
-}
-
 impl Git {
     /// The repository containing the current directory.
     pub fn discover() -> Result<Self> {
@@ -162,33 +155,25 @@ impl Git {
         Ok(changes)
     }
 
-    /// Lines added and deleted per path, exactly as `git diff --stat`
-    /// counts them, keyed by the path [`changes`] reports (a rename's
-    /// destination). Binary files report `-` for both and land as 0;
-    /// they never survive the filter to be summed.
-    pub fn line_counts(&self, from: &str, staged: bool) -> Result<HashMap<String, LineCount>> {
+    /// Lines (added, deleted) per path, as `git diff --numstat` counts
+    /// them, keyed the way [`Git::changes`] keys a rename: by destination.
+    pub fn line_counts(&self, from: &str, staged: bool) -> Result<HashMap<String, (u64, u64)>> {
+        // A binary file's counts are `-`; the filter drops those files
+        // before anything sums them, so parsing them as 0 is never seen.
+        let count = |s: &str| s.parse().unwrap_or(0);
         let mut counts = HashMap::new();
         let mut fields = self.diff("--numstat", from, staged)?.into_iter();
         while let Some(record) = fields.next() {
-            // "<added>\t<deleted>\t<path>", or with the path empty when
-            // the entry is a rename, whose two paths follow as their own
-            // NUL-terminated fields.
             let (added, rest) = record.split_once('\t').context("numstat without a tab")?;
             let (deleted, path) = rest.split_once('\t').context("numstat without a path")?;
-            let path = match path {
-                "" => {
-                    let _from = fields.next().context("rename without a source path")?;
-                    fields.next().context("rename without a target path")?
-                }
-                path => path.to_owned(),
+            // A rename leaves that path empty and follows the record with
+            // its source and then its destination.
+            let path = if path.is_empty() {
+                fields.nth(1).context("rename without paths")?
+            } else {
+                path.to_owned()
             };
-            counts.insert(
-                path,
-                LineCount {
-                    added: added.parse().unwrap_or(0),
-                    deleted: deleted.parse().unwrap_or(0),
-                },
-            );
+            counts.insert(path, (count(added), count(deleted)));
         }
         Ok(counts)
     }
