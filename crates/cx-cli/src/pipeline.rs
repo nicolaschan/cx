@@ -75,6 +75,14 @@ pub struct Skipped {
 pub struct Totals {
     pub review_bytes: u64,
     pub delta_bytes: i64,
+    /// Lines the change adds to the repo net of the ones it removes —
+    /// the familiar size next to the one this tool exists to report.
+    pub delta_lines: i64,
+}
+
+/// Lines by newline count: one measure wherever lines are reported.
+fn lines(content: &[u8]) -> u64 {
+    content.iter().filter(|&&b| b == b'\n').count() as u64
 }
 
 #[derive(Serialize)]
@@ -290,6 +298,7 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
 
     let mut files = Vec::with_capacity(items.len());
     let (mut new_i, mut old_i) = (0, 0);
+    let mut delta_lines: i64 = 0;
     for item in &items {
         let (review_bytes, review_raw, new_delta) = if item.new.is_some() {
             let r = (review.scores[new_i], delta_new.scores[new_i]);
@@ -305,11 +314,8 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
         } else {
             0.0
         };
-        let new_lines = item
-            .new
-            .as_ref()
-            .map(|c| c.iter().filter(|&&b| b == b'\n').count() as u64)
-            .unwrap_or(0);
+        let new_lines = item.new.as_deref().map_or(0, lines);
+        delta_lines += new_lines as i64 - item.old.as_deref().map_or(0, lines) as i64;
         files.push(DiffFile {
             path: item.path.clone(),
             status: item.status.clone(),
@@ -334,6 +340,7 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
         totals: Totals {
             review_bytes: review_joint,
             delta_bytes: delta_new_joint as i64 - delta_old_joint as i64,
+            delta_lines,
         },
         scales: Scales {
             review: review.scale,
@@ -382,7 +389,7 @@ pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
             .map(|((path, content), score)| AbsFile {
                 path: (*path).clone(),
                 bytes: score.rescaled,
-                lines: content.iter().filter(|&&b| b == b'\n').count() as u64,
+                lines: lines(content),
             })
             .collect();
         (files, rescaled.scale)

@@ -27,7 +27,7 @@ $ cx diff
      ≈0  −5.0 KB  −      -  │   └── poller.rs        ░░░░░░░░░░   0.1%
  1.9 KB   +248 B        92  └── README.md            █░░░░░░░░░   9.5%
 
- review 4.4 KB   ΔC +3.9 KB   1 skipped
+ review 4.4 KB   ΔC +3.9 KB   ΔLOC +1298   1 skipped
 ```
 
 The `+`/`−`/`→` column marks added, deleted, and renamed files (`⚠` for
@@ -35,11 +35,13 @@ density outliers).
 
 The footer line carries what the run is for — C(tree) where the view has
 it, review, ΔC — colored on the same magnitude scale as the cells above.
-`--verbose` adds the rest:
+ΔLOC, net lines added, rides alongside uncolored: it is the familiar
+size the other two are read against, and the point is how far they
+diverge from it. `--verbose` adds the rest:
 
 ```console
 $ cx --verbose
- C(tree) 23.4 KB   review 4.4 KB   ΔC +3.9 KB   1 skipped
+ C(tree) 23.4 KB   review 4.4 KB   ΔC +3.9 KB   ΔLOC +1298   1 skipped
  C(tree) over 23 files (83.7 KB raw)
  skipped: Cargo.lock (generated/vendored pattern)
  attribution scale: 0.94 (ok)   zstd 1.5.7, level 19, window≤2^31

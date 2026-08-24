@@ -123,6 +123,27 @@ fn scores_a_realistic_branch() {
     }
 }
 
+/// Net lines: added minus deleted, with a pure rename counting for
+/// nothing. The fixture adds novel.rs and novel_test.rs (120 lines
+/// each), deletes gone.rs (120), and moves mover.rs unchanged.
+#[test]
+fn net_lines_count_what_the_change_adds_and_removes() {
+    let (_dir, git) = setup();
+    let report = pipeline::diff(&git, &DiffOptions::default()).unwrap();
+    assert_eq!(report.totals.delta_lines, 120);
+
+    // Excluding the test file drops exactly its lines, no others.
+    let without = pipeline::diff(
+        &git,
+        &DiffOptions {
+            ignore_tests: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(without.totals.delta_lines, 0);
+}
+
 /// What excluding tests must and must not do to the numbers. That the
 /// flag reaches scoring at all is covered through the binary below.
 #[test]
