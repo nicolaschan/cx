@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::filter::Filter;
 use crate::git::{Git, Side, Status};
+use crate::strip;
 
 const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/master"];
 
@@ -95,6 +96,35 @@ fn lines(content: &[u8]) -> u64 {
     content.iter().filter(|&&b| b == b'\n').count() as u64
 }
 
+/// What a blob becomes on its way into scoring: its code, or the reason
+/// the filter dropped it. The filter sees raw bytes (binary detection
+/// needs them); everything after sees code only.
+type Prepared = Result<Vec<u8>, &'static str>;
+
+fn prepare(filter: &Filter, scope: &Scope, path: &str, raw: Vec<u8>) -> Prepared {
+    match filter.exclusion(path, &raw) {
+        Some(reason) => Err(reason),
+        None if scope.comments => Ok(raw),
+        None => Ok(strip::code_only(path, raw)),
+    }
+}
+
+/// Every path with a blob, prepared. Paths whose blob is missing (a
+/// submodule, a file gone from disk) are simply absent.
+fn load<'a>(
+    filter: &Filter,
+    scope: &Scope,
+    paths: &[&'a str],
+    blobs: Vec<Option<Vec<u8>>>,
+) -> HashMap<&'a str, Prepared> {
+    paths
+        .iter()
+        .copied()
+        .zip(blobs)
+        .filter_map(|(path, blob)| Some((path, prepare(filter, scope, path, blob?))))
+        .collect()
+}
+
 #[derive(Serialize)]
 pub struct Scales {
     pub review: f64,
@@ -144,11 +174,11 @@ pub struct AbsReport {
 }
 
 /// One changed file with whichever sides exist and passed the filter.
-struct Item {
+struct Item<'a> {
     path: String,
     status: Status,
-    old: Option<Vec<u8>>,
-    new: Option<Vec<u8>>,
+    old: Option<&'a [u8]>,
+    new: Option<&'a [u8]>,
 }
 
 /// The status stays typed everywhere; this string form exists only at
@@ -167,45 +197,41 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     let merge_base = git.merge_base(&base, "HEAD")?;
     let changes = git.changes(&merge_base, opts.scope.side)?;
 
-    // Fetch the whole old tree plus the new side of every change.
+    let scope = &opts.scope;
     let tree_paths = git.ls_tree(&merge_base)?;
     let tree_refs: Vec<&str> = tree_paths.iter().map(String::as_str).collect();
-    let old_tree: HashMap<&str, Vec<u8>> = tree_refs
-        .iter()
-        .copied()
-        .zip(git.tree_contents(&merge_base, &tree_refs)?)
-        .filter_map(|(p, b)| Some((p, b?)))
-        .collect();
-
     let new_side_paths: Vec<&str> = changes
         .iter()
         .filter(|c| c.status != Status::Deleted)
         .map(|c| c.path.as_str())
         .collect();
-    let new_contents: HashMap<&str, Vec<u8>> = new_side_paths
-        .iter()
-        .copied()
-        .zip(git.contents(opts.scope.side, &new_side_paths)?)
-        .filter_map(|(p, b)| Some((p, b?)))
-        .collect();
-
     let attr_paths: Vec<String> = tree_paths
         .iter()
         .cloned()
         .chain(new_side_paths.iter().map(|p| p.to_string()))
         .collect();
-    let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?, &opts.scope)?;
+    let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?, scope)?;
+
+    // The whole old tree plus the new side of every change, each blob
+    // filtered and reduced to code once.
+    let old_tree = load(
+        &filter,
+        scope,
+        &tree_refs,
+        git.tree_contents(&merge_base, &tree_refs)?,
+    );
+    let new_contents = load(
+        &filter,
+        scope,
+        &new_side_paths,
+        git.contents(scope.side, &new_side_paths)?,
+    );
 
     // The universe is kept files only: a file the filter excludes exists
     // in no reference and no scoring pass.
-    let kept_tree: Vec<&str> = tree_paths
+    let kept_tree: Vec<(&str, &[u8])> = tree_refs
         .iter()
-        .map(String::as_str)
-        .filter(|p| {
-            old_tree
-                .get(*p)
-                .is_some_and(|c| filter.exclusion(p, c).is_none())
-        })
+        .filter_map(|p| Some((*p, old_tree.get(p)?.as_deref().ok()?)))
         .collect();
 
     // Partition changes into scorable items and skipped files. A change
@@ -224,23 +250,25 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
                 Some(from.as_str())
             }
         };
-        let old = old_path.and_then(|p| old_tree.get(p)).cloned();
+        let old = old_path.and_then(|p| old_tree.get(p));
         let new = (change.status != Status::Deleted)
-            .then(|| new_contents.get(change.path.as_str()).cloned())
+            .then(|| new_contents.get(change.path.as_str()))
             .flatten();
-        let exclusion = [
-            (&new, change.path.as_str()),
-            (&old, old_path.unwrap_or_default()),
-        ]
-        .into_iter()
-        .find_map(|(content, path)| content.as_ref().and_then(|c| filter.exclusion(path, c)));
-        if let Some(reason) = exclusion {
+        if let Some(reason) = [new, old]
+            .into_iter()
+            .flatten()
+            .find_map(|b| b.as_ref().err())
+        {
             skipped.push(Skipped {
                 path: change.path.clone(),
-                reason: reason.to_owned(),
+                reason: (*reason).to_owned(),
             });
             continue;
         }
+        fn code(blob: Option<&Prepared>) -> Option<&[u8]> {
+            blob.and_then(|b| b.as_deref().ok())
+        }
+        let (old, new) = (code(old), code(new));
         if old.is_none() && new.is_none() {
             continue;
         }
@@ -254,27 +282,19 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     items.sort_by(|a, b| a.path.cmp(&b.path));
 
     let scorer = Scorer::default();
-    let assemble = |paths: &[&str]| -> Vec<u8> {
-        scorer.assemble(
-            &paths
-                .iter()
-                .map(|p| old_tree[*p].as_slice())
-                .collect::<Vec<_>>(),
-        )
-    };
-    let old_tree_ref = assemble(&kept_tree);
-    let remainder: Vec<&str> = kept_tree
+    let old_tree_ref = scorer.assemble(&kept_tree.iter().map(|(_, c)| *c).collect::<Vec<_>>());
+    let remainder: Vec<&[u8]> = kept_tree
         .iter()
-        .copied()
-        .filter(|p| !touched.contains(p))
+        .filter(|(p, _)| !touched.contains(p))
+        .map(|(_, c)| *c)
         .collect();
-    let remainder_ref = assemble(&remainder);
+    let remainder_ref = scorer.assemble(&remainder);
 
     // The three passes (plan §3): metric 1 against the full old tree,
     // metric 2 as new-vs-old against the neutral remainder, metric 3 as
     // joint compressions that are also the rescale targets.
-    let new_items: Vec<&[u8]> = items.iter().filter_map(|i| i.new.as_deref()).collect();
-    let old_items: Vec<&[u8]> = items.iter().filter_map(|i| i.old.as_deref()).collect();
+    let new_items: Vec<&[u8]> = items.iter().filter_map(|i| i.new).collect();
+    let old_items: Vec<&[u8]> = items.iter().filter_map(|i| i.old).collect();
 
     let review_seq = scorer.score_sequential(&old_tree_ref, &new_items);
     let review_joint = scorer.score_joint(&old_tree_ref, &new_items);
@@ -305,7 +325,7 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
         } else {
             0.0
         };
-        let new_lines = item.new.as_deref().map_or(0, lines);
+        let new_lines = item.new.map_or(0, lines);
         files.push(DiffFile {
             path: item.path.clone(),
             status: item.status.clone(),
@@ -348,22 +368,24 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
 }
 
 pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
-    let paths = git.list(opts.scope.side)?;
+    let scope = &opts.scope;
+    let paths = git.list(scope.side)?;
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-    let contents: Vec<(String, Vec<u8>)> = paths
+    let blobs = git.contents(scope.side, &path_refs)?;
+    let attr_paths: Vec<String> = path_refs
         .iter()
-        .cloned()
-        .zip(git.contents(opts.scope.side, &path_refs)?)
-        .filter_map(|(p, b)| Some((p, b?)))
+        .zip(&blobs)
+        .filter_map(|(p, b)| b.as_ref().map(|_| p.to_string()))
         .collect();
-    let attr_paths: Vec<String> = contents.iter().map(|(p, _)| p.clone()).collect();
-    let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?, &opts.scope)?;
-    let kept: Vec<(&String, &[u8])> = contents
-        .iter()
-        .filter(|(p, c)| filter.exclusion(p, c).is_none())
-        .map(|(p, c)| (p, c.as_slice()))
+    let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?, scope)?;
+    // `load` hands back a map; the chain rule wants sorted-path order,
+    // which is the order `git.list` produced.
+    let mut kept: Vec<(&str, Vec<u8>)> = load(&filter, scope, &path_refs, blobs)
+        .into_iter()
+        .filter_map(|(p, prepared)| Some((p, prepared.ok()?)))
         .collect();
-    let kept_contents: Vec<&[u8]> = kept.iter().map(|(_, c)| *c).collect();
+    kept.sort_by(|a, b| a.0.cmp(b.0));
+    let kept_contents: Vec<&[u8]> = kept.iter().map(|(_, c)| c.as_slice()).collect();
 
     let scorer = Scorer::default();
     let blob = scorer.assemble(&kept_contents);
@@ -380,7 +402,7 @@ pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
             .iter()
             .zip(&rescaled.scores)
             .map(|((path, content), score)| AbsFile {
-                path: (*path).clone(),
+                path: (*path).to_owned(),
                 bytes: score.rescaled,
                 lines: lines(content),
             })
