@@ -53,8 +53,7 @@ impl Scorer {
         }
     }
 
-    /// C(input | reference): the bytes `input` adds to the compressed
-    /// stream after `reference`.
+    /// C(input | reference).
     pub fn score(&self, reference: &[&[u8]], input: &[u8]) -> u64 {
         self.attribution(reference, &[input]).run(&|_| {})[0]
     }
@@ -71,20 +70,19 @@ impl Scorer {
         }
     }
 
-    /// Smallest window covering the whole stream, clamped to zstd's floor
-    /// of 10 and this scorer's platform ceiling.
+    /// Smallest window covering the whole reference + input, clamped to
+    /// zstd's floor of 10 and this scorer's platform ceiling.
     fn window_log(&self, stream_len: u64) -> u32 {
         let needed = u64::BITS - stream_len.saturating_sub(1).leading_zeros();
         needed.clamp(10, self.max_window_log)
     }
 }
 
-/// One compressed stream: the reference, then each item, with a flush at
-/// every part boundary. An item's score is the bytes its part added to
-/// the output — C(item_i | reference ++ items[..i]), the chain rule, so a
-/// pattern repeated across items is charged to its first occurrence and
-/// near-free afterwards. A part's score is a function of the bytes before
-/// it and nothing after.
+/// One zstd stream — reference, then items — flushed at every part
+/// boundary, so an item's score is the bytes its part added:
+/// C(item_i | reference ++ items[..i]), sequential chain-rule scoring, so
+/// a pattern repeated across items is charged to its first occurrence and
+/// near-free afterwards.
 pub struct Attribution<'a> {
     scorer: &'a Scorer,
     reference: &'a [&'a [u8]],
@@ -92,8 +90,7 @@ pub struct Attribution<'a> {
 }
 
 impl Attribution<'_> {
-    /// The stream's length: bytes to compress, the unit progress advances
-    /// in.
+    /// Bytes to compress: the unit `progress` advances in.
     pub fn bytes(&self) -> u64 {
         self.reference
             .iter()
@@ -102,8 +99,8 @@ impl Attribution<'_> {
             .sum()
     }
 
-    /// Each item's score, in order. `progress` receives each part's
-    /// length as it finishes, reference parts included.
+    /// Each item's score; `progress` receives each part's length as it
+    /// finishes, reference parts included.
     pub fn run(&self, progress: &(dyn Fn(u64) + Sync)) -> Vec<u64> {
         let mut cctx = CCtx::create();
         let set = |cctx: &mut CCtx, p| {
@@ -124,9 +121,8 @@ impl Attribution<'_> {
             out.clear();
             let mut source = InBuffer::around(part);
             loop {
-                // Room for at least one more block, so every call makes
-                // progress; zstd reports 0 once the part is consumed and
-                // flushed.
+                // Room for one more block so every call makes progress;
+                // zstd reports 0 once the part is consumed and flushed.
                 out.reserve(CCtx::out_size());
                 let pos = out.len();
                 let mut sink = OutBuffer::around_pos(&mut out, pos);

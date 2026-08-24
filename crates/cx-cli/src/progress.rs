@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-/// Whether progress may draw at all: the caller's answer to "is stderr a
-/// terminal?", decided once, the way color is for stdout.
+/// Whether progress may draw, decided once by the caller the way color
+/// is for stdout.
 #[derive(Clone, Copy, Default)]
 pub struct Progress {
     pub visible: bool,

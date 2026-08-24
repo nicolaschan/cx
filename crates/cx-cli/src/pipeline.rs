@@ -101,8 +101,8 @@ pub struct AbsOptions {
     pub side: Side,
 }
 
-/// One file's contribution to C(tree): its chain-rule score in sorted-path
-/// order; contributions sum to C(tree).
+/// One file's contribution to C(tree): its sequential chain-rule score in
+/// sorted-path order.
 #[derive(Serialize)]
 pub struct AbsFile {
     pub path: String,
@@ -115,7 +115,6 @@ pub struct AbsReport {
     pub version: VersionInfo,
     pub snapshot: &'static str,
     pub file_count: usize,
-    /// The kept files' sizes, summed.
     pub raw_bytes: u64,
     pub compressed_bytes: u64,
     pub files: Vec<AbsFile>,
