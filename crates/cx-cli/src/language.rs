@@ -53,11 +53,13 @@ fn from_shebang(content: &[u8]) -> Option<LanguageType> {
         "env" => words.find(|w| !w.starts_with('-'))?,
         program => program,
     };
-    // Try the exact name first, so "perl6" (Raku's old name) isn't mistaken
-    // for a version-numbered "perl". Only then trim a trailing version like
-    // the "3" in "python3" or "3.11".
-    by_name(program)
-        .or_else(|| by_name(program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')))
+    // "perl6" is Raku, not a versioned perl: exact name before trimmed.
+    by_name(program).or_else(|| by_name(without_version(program)))
+}
+
+/// `python3.11` → `python`.
+fn without_version(interpreter: &str) -> &str {
+    interpreter.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
 }
 
 fn by_name(interpreter: &str) -> Option<LanguageType> {
@@ -107,9 +109,6 @@ mod tests {
                 "#!/usr/bin/env -S python3 -u\n",
                 Some(LanguageType::Python),
             ),
-            // An interpreter tokei has no shebang mapping for is a miss, not
-            // a guess from its first letter as a file extension (`m4` is not
-            // ObjectiveC's `.m`).
             ("bin/run", "#!/usr/bin/env m4\n", None),
         ] {
             assert_eq!(of(path, content.as_bytes()), want, "{path} {content:?}");
