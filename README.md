@@ -2,9 +2,9 @@
 
 Score git diffs by **marginal description length**: how much new information
 a change adds, conditioned on what the codebase already contains. The
-estimator is one zstd stream — the codebase first, then the change, a flush
-at every file — so a file's score is the bytes it adds to the compressed
-output. Language-independent, grounded in MDL / the software-naturalness literature (Hindle et al. 2012;
+estimator is one zstd stream — the codebase, then the change, flushed at
+every file, so a file's score is the bytes it adds — language-independent,
+grounded in MDL / the software-naturalness literature (Hindle et al. 2012;
 Ray et al. 2016).
 
 Two independent axes per file, one PR total:
@@ -69,9 +69,9 @@ The tree breakdown is dust-style: contributions aggregate up the
 directory tree, only the `-n` globally biggest files/directories are
 shown (default 30), and everything pruned collapses into a per-directory
 `… +N more` row — so the view stays one screen even on repos with
-thousands of files. `--no-files` suppresses the breakdown. Output colorizes on a terminal
-and degrades to plain text when piped; a progress bar on stderr tracks the
-run while it is a terminal.
+thousands of files. `--no-files` suppresses the breakdown. Output
+colorizes on a terminal and degrades to plain text when piped; a progress
+bar on stderr tracks the run while it is a terminal.
 
 `--json` emits the full report (per-file scores, skipped files, totals,
 compressor version) — the stable contract for tooling.
