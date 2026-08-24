@@ -330,7 +330,7 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
 
     let scorer = Scorer::default();
     let tree = scorer.attribution(&[], &kept_contents);
-    let scores = tree.run(&progress.phase("C(tree)", tree.bytes()));
+    let scores = tree.run(progress.phase("C(tree)", tree.bytes()));
     let mut files: Vec<AbsFile> = kept
         .iter()
         .zip(&scores)
