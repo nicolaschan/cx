@@ -300,12 +300,13 @@ impl<'a> Footer<'a> {
                 .push(opts.stat("review", fmt_bytes(review), score_color(review)));
             self.summary
                 .push(opts.stat("ΔC", fmt_signed(delta), score_color(delta)));
-            // ΔLOC is the familiar size ΔC is read against, so it sits
-            // next to it — uncolored, because it is the reference, not a
+            // The familiar size ΔC is read against, so it sits next to
+            // it — uncolored, because it is the reference, not a
             // verdict, and no line count means the same thing in two
             // repos the way the byte thresholds do.
+            let (added, deleted) = (diff.totals.added_lines, diff.totals.deleted_lines);
             self.summary
-                .push(opts.stat("ΔLOC", fmt_lines(diff.totals.delta_lines), None));
+                .push(opts.stat("lines", format!("+{added} −{deleted}"), None));
         }
         if !diff.skipped.is_empty() {
             // The count stays on the summary line: it says the totals
@@ -430,16 +431,6 @@ fn fmt_bytes(bytes: f64) -> String {
     }
 }
 
-/// Signed line count: exact, and signed like the ΔC beside it — a count
-/// has no threshold below which it may as well be zero.
-fn fmt_lines(lines: i64) -> String {
-    match lines {
-        0 => "0".to_owned(),
-        1.. => format!("+{lines}"),
-        _ => format!("−{}", lines.unsigned_abs()),
-    }
-}
-
 fn fmt_signed(bytes: f64) -> String {
     if bytes.abs() < 64.0 {
         "≈0".to_owned()
@@ -513,7 +504,8 @@ mod tests {
             totals: Totals {
                 review_bytes: 2048,
                 delta_bytes: 1024,
-                delta_lines: 40,
+                added_lines: 40,
+                deleted_lines: 12,
             },
             scales: Scales {
                 review: 1.0,
@@ -529,7 +521,8 @@ mod tests {
         verbose: false,
         color: false,
     };
-    const SUMMARY: &str = " C(tree) 10.0 KB   review 2.0 KB   ΔC +1.0 KB   ΔLOC +40   1 skipped\n";
+    const SUMMARY: &str =
+        " C(tree) 10.0 KB   review 2.0 KB   ΔC +1.0 KB   lines +40 −12   1 skipped\n";
 
     /// Everything the overview prints below its table.
     fn footer(abs: &AbsReport, diff: &DiffReport, opts: Options) -> String {
@@ -607,7 +600,7 @@ mod tests {
                 " {grey}C(tree){reset} 10.0 KB   \
                  {grey}review{reset} {yellow}2.0 KB{reset}   \
                  {grey}ΔC{reset} {yellow}+1.0 KB{reset}   \
-                 {grey}ΔLOC{reset} +40   \
+                 {grey}lines{reset} +40 −12   \
                  {grey}1 skipped{reset}\n"
             )
         );
@@ -652,14 +645,6 @@ mod tests {
             status_marker(&diff_file(Status::Added, true)),
             Some("+ ⚠".into())
         );
-    }
-
-    /// A net removal must read as one, and a wash as neither.
-    #[test]
-    fn line_formatting() {
-        assert_eq!(fmt_lines(0), "0");
-        assert_eq!(fmt_lines(7), "+7");
-        assert_eq!(fmt_lines(-1200), "−1200");
     }
 
     #[test]

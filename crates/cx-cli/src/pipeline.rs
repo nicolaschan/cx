@@ -75,9 +75,11 @@ pub struct Skipped {
 pub struct Totals {
     pub review_bytes: u64,
     pub delta_bytes: i64,
-    /// Lines the change adds to the repo net of the ones it removes —
-    /// the familiar size next to the one this tool exists to report.
-    pub delta_lines: i64,
+    /// Lines added and deleted over the scored files — the familiar
+    /// size next to the one this tool exists to report. Skipped files
+    /// are not in it, so it counts what the bytes above it cover.
+    pub added_lines: u64,
+    pub deleted_lines: u64,
 }
 
 /// Lines by newline count: one measure wherever lines are reported.
@@ -298,7 +300,6 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
 
     let mut files = Vec::with_capacity(items.len());
     let (mut new_i, mut old_i) = (0, 0);
-    let mut delta_lines: i64 = 0;
     for item in &items {
         let (review_bytes, review_raw, new_delta) = if item.new.is_some() {
             let r = (review.scores[new_i], delta_new.scores[new_i]);
@@ -315,7 +316,6 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
             0.0
         };
         let new_lines = item.new.as_deref().map_or(0, lines);
-        delta_lines += new_lines as i64 - item.old.as_deref().map_or(0, lines) as i64;
         files.push(DiffFile {
             path: item.path.clone(),
             status: item.status.clone(),
@@ -331,6 +331,14 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     flag_density_outliers(&mut files);
     files.sort_by(|a, b| b.review_bytes.total_cmp(&a.review_bytes));
 
+    // Churn over the same files the bytes above cover: a skipped file is
+    // absent from `items` and so absent from this too.
+    let churn = git.line_counts(&merge_base, opts.staged)?;
+    let (added_lines, deleted_lines) = items.iter().fold((0, 0), |(added, deleted), item| {
+        let count = churn.get(&item.path).copied().unwrap_or_default();
+        (added + count.added, deleted + count.deleted)
+    });
+
     Ok(DiffReport {
         version: VersionInfo::for_scorer(&scorer),
         base,
@@ -340,7 +348,8 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
         totals: Totals {
             review_bytes: review_joint,
             delta_bytes: delta_new_joint as i64 - delta_old_joint as i64,
-            delta_lines,
+            added_lines,
+            deleted_lines,
         },
         scales: Scales {
             review: review.scale,

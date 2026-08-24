@@ -123,14 +123,18 @@ fn scores_a_realistic_branch() {
     }
 }
 
-/// Net lines: added minus deleted, with a pure rename counting for
-/// nothing. The fixture adds novel.rs and novel_test.rs (120 lines
-/// each), deletes gone.rs (120), and moves mover.rs unchanged.
+/// Line churn, counted as git counts it: the fixture adds novel.rs and
+/// novel_test.rs (120 lines each) and deletes gone.rs (120), while the
+/// rename of mover.rs and the skipped lockfile and binary count for
+/// nothing.
 #[test]
-fn net_lines_count_what_the_change_adds_and_removes() {
+fn line_churn_counts_what_git_counts() {
     let (_dir, git) = setup();
     let report = pipeline::diff(&git, &DiffOptions::default()).unwrap();
-    assert_eq!(report.totals.delta_lines, 120);
+    assert_eq!(
+        (report.totals.added_lines, report.totals.deleted_lines),
+        (240, 120)
+    );
 
     // Excluding the test file drops exactly its lines, no others.
     let without = pipeline::diff(
@@ -141,7 +145,10 @@ fn net_lines_count_what_the_change_adds_and_removes() {
         },
     )
     .unwrap();
-    assert_eq!(without.totals.delta_lines, 0);
+    assert_eq!(
+        (without.totals.added_lines, without.totals.deleted_lines),
+        (120, 120)
+    );
 }
 
 /// What excluding tests must and must not do to the numbers. That the

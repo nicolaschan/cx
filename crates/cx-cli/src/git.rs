@@ -27,6 +27,13 @@ pub struct Change {
     pub status: Status,
 }
 
+/// One path's line churn, as git counts it.
+#[derive(Clone, Copy, Default)]
+pub struct LineCount {
+    pub added: u64,
+    pub deleted: u64,
+}
+
 impl Git {
     /// The repository containing the current directory.
     pub fn discover() -> Result<Self> {
@@ -98,9 +105,11 @@ impl Git {
         Ok(split_nul(&out))
     }
 
-    /// Changed files between `from` and either HEAD or the index.
-    pub fn changes(&self, from: &str, staged: bool) -> Result<Vec<Change>> {
-        let mut args = vec!["diff", "--name-status", "-z", "--find-renames"];
+    /// One `git diff` of the scored range, in the requested format: the
+    /// listings below must describe the same diff, down to how renames
+    /// were detected.
+    fn diff(&self, format: &str, from: &str, staged: bool) -> Result<Vec<String>> {
+        let mut args = vec!["diff", format, "-z", "--find-renames"];
         if staged {
             args.push("--cached");
         }
@@ -108,8 +117,12 @@ impl Git {
         if !staged {
             args.push("HEAD");
         }
-        let out = self.run(&args)?;
-        let fields = split_nul(&out);
+        Ok(split_nul(&self.run(&args)?))
+    }
+
+    /// Changed files between `from` and either HEAD or the index.
+    pub fn changes(&self, from: &str, staged: bool) -> Result<Vec<Change>> {
+        let fields = self.diff("--name-status", from, staged)?;
         let mut changes = Vec::new();
         let mut it = fields.into_iter();
         while let Some(status) = it.next() {
@@ -147,6 +160,37 @@ impl Git {
             }
         }
         Ok(changes)
+    }
+
+    /// Lines added and deleted per path, exactly as `git diff --stat`
+    /// counts them, keyed by the path [`changes`] reports (a rename's
+    /// destination). Binary files report `-` for both and land as 0;
+    /// they never survive the filter to be summed.
+    pub fn line_counts(&self, from: &str, staged: bool) -> Result<HashMap<String, LineCount>> {
+        let mut counts = HashMap::new();
+        let mut fields = self.diff("--numstat", from, staged)?.into_iter();
+        while let Some(record) = fields.next() {
+            // "<added>\t<deleted>\t<path>", or with the path empty when
+            // the entry is a rename, whose two paths follow as their own
+            // NUL-terminated fields.
+            let (added, rest) = record.split_once('\t').context("numstat without a tab")?;
+            let (deleted, path) = rest.split_once('\t').context("numstat without a path")?;
+            let path = match path {
+                "" => {
+                    let _from = fields.next().context("rename without a source path")?;
+                    fields.next().context("rename without a target path")?
+                }
+                path => path.to_owned(),
+            };
+            counts.insert(
+                path,
+                LineCount {
+                    added: added.parse().unwrap_or(0),
+                    deleted: deleted.parse().unwrap_or(0),
+                },
+            );
+        }
+        Ok(counts)
     }
 
     /// Bulk-fetch blob contents. Specs are object names (`<rev>:<path>`,
