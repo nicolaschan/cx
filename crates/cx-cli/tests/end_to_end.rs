@@ -8,6 +8,7 @@ use std::process::Command;
 
 use cx_cli::git::{Git, Side, Status};
 use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::progress::Progress;
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -70,6 +71,7 @@ fn scores_a_realistic_branch() {
             side: Side::Head,
             ..Default::default()
         },
+        Progress::default(),
     )
     .unwrap();
 
@@ -83,10 +85,10 @@ fn scores_a_realistic_branch() {
 
     let novel = by_path("src/novel.rs");
     assert!(
-        novel.review_bytes > 500.0,
+        novel.review_bytes > 500,
         "novel logic must cost review attention"
     );
-    assert!(novel.delta_bytes > 500.0, "novel logic must add complexity");
+    assert!(novel.delta_bytes > 500, "novel logic must add complexity");
 
     let moved = by_path("src/moved.rs");
     assert_eq!(
@@ -96,18 +98,18 @@ fn scores_a_realistic_branch() {
         }
     );
     assert!(
-        moved.review_bytes < 64.0,
+        moved.review_bytes < 64,
         "pure move must be ≈ free to review"
     );
     assert!(
-        moved.delta_bytes.abs() < 64.0,
+        moved.delta_bytes.abs() < 64,
         "pure move must not change complexity"
     );
 
     let gone = by_path("src/gone.rs");
     assert_eq!(gone.status, Status::Deleted);
     assert!(
-        gone.delta_bytes < -500.0,
+        gone.delta_bytes < -500,
         "deleting unique content refunds complexity"
     );
 
@@ -117,17 +119,6 @@ fn scores_a_realistic_branch() {
         "lockfile churn must be skipped"
     );
     assert!(skipped.contains(&"logo.png"), "binary must be skipped");
-
-    for scale in [
-        report.scales.review,
-        report.scales.delta_new,
-        report.scales.delta_old,
-    ] {
-        assert!(
-            (0.5..=1.5).contains(&scale),
-            "implausible scale factor {scale}"
-        );
-    }
 }
 
 /// Line churn, counted as git counts it: the fixture adds novel.rs and
@@ -138,7 +129,7 @@ fn scores_a_realistic_branch() {
 #[test]
 fn line_churn_counts_what_git_counts() {
     let (_dir, git) = setup();
-    let report = pipeline::diff(&git, &DiffOptions::default()).unwrap();
+    let report = pipeline::diff(&git, &DiffOptions::default(), Progress::default()).unwrap();
     assert_eq!(
         (report.totals.added_lines, report.totals.deleted_lines),
         (120, 120)
@@ -151,6 +142,7 @@ fn line_churn_counts_what_git_counts() {
             include_tests: true,
             ..Default::default()
         },
+        Progress::default(),
     )
     .unwrap();
     assert_eq!(
@@ -171,6 +163,7 @@ fn excluding_tests_drops_their_cost_and_leaves_the_rest() {
                 include_tests,
                 ..Default::default()
             },
+            Progress::default(),
         )
         .unwrap()
     };
@@ -183,7 +176,7 @@ fn excluding_tests_drops_their_cost_and_leaves_the_rest() {
     let (with, without) = (scored(true), scored(false));
 
     assert!(
-        review(&with, "tests/novel_test.rs").is_some_and(|b| b > 500.0),
+        review(&with, "tests/novel_test.rs").is_some_and(|b| b > 500),
         "the fixture's test must be substantial enough to matter"
     );
     assert_eq!(review(&without, "tests/novel_test.rs"), None);
@@ -198,7 +191,7 @@ fn excluding_tests_drops_their_cost_and_leaves_the_rest() {
         review(&without, "src/novel.rs").unwrap(),
     );
     assert!(
-        (before - after).abs() < 0.25 * before,
+        before.abs_diff(after) < before / 4,
         "production scores should barely move: {before} vs {after}"
     );
 }
@@ -262,11 +255,12 @@ fn staged_mode_scores_the_index() {
             side: Side::Index,
             ..Default::default()
         },
+        Progress::default(),
     )
     .unwrap();
     let staged = report.files.iter().find(|f| f.path == "src/staged.rs");
     assert!(
-        staged.is_some_and(|f| f.review_bytes > 300.0),
+        staged.is_some_and(|f| f.review_bytes > 300),
         "staged file must be scored"
     );
 }
@@ -280,6 +274,7 @@ fn tree_reports_absolute_complexity_with_contributions() {
             side: Side::Head,
             ..Default::default()
         },
+        Progress::default(),
     )
     .unwrap();
     // keep.rs + moved.rs + novel.rs; Cargo.lock, logo.png and
@@ -289,34 +284,16 @@ fn tree_reports_absolute_complexity_with_contributions() {
     assert!(report.compressed_bytes < report.raw_bytes);
 
     assert_eq!(report.files.len(), 3);
-    let sum: f64 = report.files.iter().map(|f| f.bytes).sum();
-    assert!(
-        (sum - report.compressed_bytes as f64).abs() < 1e-6 * sum,
-        "contributions must sum to C(tree): {sum} vs {}",
-        report.compressed_bytes
+    let sum: u64 = report.files.iter().map(|f| f.bytes).sum();
+    assert_eq!(
+        sum, report.compressed_bytes,
+        "contributions must sum to C(tree)"
     );
     assert!(
         report.files.windows(2).all(|w| w[0].bytes >= w[1].bytes),
         "contributions must be sorted descending"
     );
     assert!(report.files.iter().all(|f| f.lines > 0));
-}
-
-#[test]
-fn tree_contributions_are_suppressable() {
-    let (_dir, git) = setup();
-    let report = pipeline::abs(
-        &git,
-        &AbsOptions {
-            no_files: true,
-            side: Side::Head,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(report.file_count, 3);
-    assert!(report.files.is_empty());
-    assert_eq!(report.scale, 1.0);
 }
 
 #[test]
@@ -339,13 +316,14 @@ fn worktree_side_scores_the_whole_working_tree() {
             side: Side::Worktree,
             ..Default::default()
         },
+        Progress::default(),
     )
     .unwrap();
     let scored = |p: &str| report.files.iter().find(|f| f.path == p);
 
     for path in ["src/staged.rs", "src/keep.rs", "src/untracked.rs"] {
         assert!(
-            scored(path).is_some_and(|f| f.review_bytes > 300.0),
+            scored(path).is_some_and(|f| f.review_bytes > 300),
             "{path} must be scored: {:?}",
             report.files.iter().map(|f| &f.path).collect::<Vec<_>>()
         );
@@ -364,6 +342,7 @@ fn worktree_side_scores_the_whole_working_tree() {
             side: Side::Index,
             ..Default::default()
         },
+        Progress::default(),
     )
     .unwrap();
     let staged_paths: Vec<&str> = staged_only.files.iter().map(|f| f.path.as_str()).collect();
@@ -391,6 +370,7 @@ fn abs_measures_the_snapshot_it_is_asked_for() {
                 side,
                 ..Default::default()
             },
+            Progress::default(),
         )
         .unwrap();
         let mut paths: Vec<String> = report.files.iter().map(|f| f.path.clone()).collect();
@@ -470,6 +450,7 @@ fn an_unmerged_path_is_scored_once() {
             side: Side::Worktree,
             ..Default::default()
         },
+        Progress::default(),
     )
     .unwrap();
     assert_eq!(
@@ -490,6 +471,7 @@ fn untracked_lines_reach_the_churn_totals() {
             side: Side::Head,
             ..Default::default()
         },
+        Progress::default(),
     )
     .unwrap();
 
@@ -500,6 +482,7 @@ fn untracked_lines_reach_the_churn_totals() {
             side: Side::Worktree,
             ..Default::default()
         },
+        Progress::default(),
     )
     .unwrap();
 

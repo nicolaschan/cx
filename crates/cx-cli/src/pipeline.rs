@@ -1,14 +1,16 @@
 //! Orchestrates a scoring run: resolve refs, fetch blobs, filter, build
-//! the two references, run the three metric passes, rescale.
+//! the two references, run the three metric passes.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
-use cx_core::{Scorer, rescale};
+use cx_core::Scorer;
 use serde::Serialize;
 
 use crate::filter::Filter;
 use crate::git::{Git, Side, Status};
+use crate::progress::Progress;
 
 const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/master"];
 
@@ -49,11 +51,10 @@ pub struct DiffFile {
     /// "renamed from <path>".
     #[serde(serialize_with = "serialize_status")]
     pub status: Status,
-    /// Metric 1, rescaled: what the reviewer must newly absorb.
-    pub review_bytes: f64,
-    pub review_raw: u64,
-    /// Metric 2, rescaled: complexity added (+) or removed (−).
-    pub delta_bytes: f64,
+    /// Metric 1: what the reviewer must newly absorb.
+    pub review_bytes: u64,
+    /// Metric 2: complexity added (+) or removed (−).
+    pub delta_bytes: i64,
     pub new_lines: u64,
     /// review_bytes / new_lines — density separates tables from
     /// algorithms. Only defined for added files, where all lines are
@@ -84,13 +85,6 @@ fn lines(content: &[u8]) -> u64 {
 }
 
 #[derive(Serialize)]
-pub struct Scales {
-    pub review: f64,
-    pub delta_new: f64,
-    pub delta_old: f64,
-}
-
-#[derive(Serialize)]
 pub struct DiffReport {
     pub version: VersionInfo,
     pub base: String,
@@ -98,25 +92,21 @@ pub struct DiffReport {
     pub files: Vec<DiffFile>,
     pub skipped: Vec<Skipped>,
     pub totals: Totals,
-    pub scales: Scales,
 }
 
 #[derive(Default)]
 pub struct AbsOptions {
-    /// Skip per-file contributions, leaving one joint compression —
-    /// much faster on big trees.
-    pub no_files: bool,
     /// Score test files too; otherwise they leave the universe entirely.
     pub include_tests: bool,
     pub side: Side,
 }
 
 /// One file's contribution to C(tree): its sequential chain-rule score in
-/// sorted-path order, rescaled so contributions sum to the joint total.
+/// sorted-path order.
 #[derive(Serialize)]
 pub struct AbsFile {
     pub path: String,
-    pub bytes: f64,
+    pub bytes: u64,
     pub lines: u64,
 }
 
@@ -127,10 +117,7 @@ pub struct AbsReport {
     pub file_count: usize,
     pub raw_bytes: u64,
     pub compressed_bytes: u64,
-    /// Empty when contributions were suppressed.
     pub files: Vec<AbsFile>,
-    /// Attribution noise gauge for `files`; 1.0 when suppressed.
-    pub scale: f64,
 }
 
 /// One changed file with whichever sides exist and passed the filter.
@@ -152,7 +139,7 @@ fn serialize_status<S: serde::Serializer>(status: &Status, s: S) -> Result<S::Ok
     })
 }
 
-pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
+pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffReport> {
     let base = resolve_base(git, opts.base.as_deref())?;
     let merge_base = git.merge_base(&base, "HEAD")?;
     let changes = git.changes(&merge_base, opts.side)?;
@@ -248,72 +235,54 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     items.sort_by(|a, b| a.path.cmp(&b.path));
 
     let scorer = Scorer::default();
-    let assemble = |paths: &[&str]| -> Vec<u8> {
-        scorer.assemble(
-            &paths
-                .iter()
-                .map(|p| old_tree[*p].as_slice())
-                .collect::<Vec<_>>(),
-        )
-    };
-    let old_tree_ref = assemble(&kept_tree);
-    let remainder: Vec<&str> = kept_tree
+    let tree: Vec<&[u8]> = kept_tree.iter().map(|p| old_tree[*p].as_slice()).collect();
+    let remainder: Vec<&[u8]> = kept_tree
         .iter()
         .copied()
         .filter(|p| !touched.contains(p))
+        .map(|p| old_tree[p].as_slice())
         .collect();
-    let remainder_ref = assemble(&remainder);
 
-    // The three passes (plan §3): metric 1 against the full old tree,
-    // metric 2 as new-vs-old against the neutral remainder, metric 3 as
-    // joint compressions that are also the rescale targets.
-    let new_items: Vec<&[u8]> = items.iter().filter_map(|i| i.new.as_deref()).collect();
-    let old_items: Vec<&[u8]> = items.iter().filter_map(|i| i.old.as_deref()).collect();
-
-    let review_seq = scorer.score_sequential(&old_tree_ref, &new_items);
-    let review_joint = scorer.score_joint(&old_tree_ref, &new_items);
-    let review = rescale(&review_seq, review_joint);
-
-    let delta_new_seq = scorer.score_sequential(&remainder_ref, &new_items);
-    let delta_new_joint = scorer.score_joint(&remainder_ref, &new_items);
-    let delta_new = rescale(&delta_new_seq, delta_new_joint);
-
-    let delta_old_seq = scorer.score_sequential(&remainder_ref, &old_items);
-    let delta_old_joint = scorer.score_joint(&remainder_ref, &old_items);
-    let delta_old = rescale(&delta_old_seq, delta_old_joint);
+    // Metric 1 is new against the full old tree; metric 2 is new minus
+    // old, each against the neutral remainder. A missing side is the
+    // empty file, which scores 0, so every pass is indexed like `items`.
+    let new_items: Vec<&[u8]> = items
+        .iter()
+        .map(|i| i.new.as_deref().unwrap_or_default())
+        .collect();
+    let old_items: Vec<&[u8]> = items
+        .iter()
+        .map(|i| i.old.as_deref().unwrap_or_default())
+        .collect();
+    let passes = [
+        scorer.attribution(&tree, &new_items),
+        scorer.attribution(&remainder, &new_items),
+        scorer.attribution(&remainder, &old_items),
+    ];
+    let bar = &progress.bar("diff", passes.iter().map(|pass| pass.bytes()).sum());
+    let [review, delta_new, delta_old] = std::thread::scope(|scope| {
+        passes
+            .each_ref()
+            .map(|pass| scope.spawn(move || pass.run(bar)))
+            .map(|stream| stream.join().expect("stream thread"))
+    });
 
     let mut files = Vec::with_capacity(items.len());
-    let (mut new_i, mut old_i) = (0, 0);
-    for item in &items {
-        let (review_bytes, review_raw, new_delta) = if item.new.is_some() {
-            let r = (review.scores[new_i], delta_new.scores[new_i]);
-            new_i += 1;
-            (r.0.rescaled, r.0.raw, r.1.rescaled)
-        } else {
-            (0.0, 0, 0.0)
-        };
-        let old_delta = if item.old.is_some() {
-            let d = delta_old.scores[old_i].rescaled;
-            old_i += 1;
-            d
-        } else {
-            0.0
-        };
-        let new_lines = item.new.as_deref().map_or(0, lines);
+    for (i, item) in items.iter().enumerate() {
+        let new_lines = lines(new_items[i]);
         files.push(DiffFile {
             path: item.path.clone(),
             status: item.status.clone(),
-            review_bytes,
-            review_raw,
-            delta_bytes: new_delta - old_delta,
+            review_bytes: review[i],
+            delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
             new_lines,
             bytes_per_line: (item.status == Status::Added && new_lines > 0)
-                .then(|| review_bytes / new_lines as f64),
+                .then(|| review[i] as f64 / new_lines as f64),
             density_outlier: false,
         });
     }
     flag_density_outliers(&mut files);
-    files.sort_by(|a, b| b.review_bytes.total_cmp(&a.review_bytes));
+    files.sort_by_key(|f| Reverse(f.review_bytes));
 
     let churn = git.line_counts(&merge_base, opts.side)?;
     let (added_lines, deleted_lines) = items
@@ -325,23 +294,18 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
         version: VersionInfo::for_scorer(&scorer),
         base,
         merge_base,
-        files,
-        skipped,
         totals: Totals {
-            review_bytes: review_joint,
-            delta_bytes: delta_new_joint as i64 - delta_old_joint as i64,
+            review_bytes: files.iter().map(|f| f.review_bytes).sum(),
+            delta_bytes: files.iter().map(|f| f.delta_bytes).sum(),
             added_lines,
             deleted_lines,
         },
-        scales: Scales {
-            review: review.scale,
-            delta_new: delta_new.scale,
-            delta_old: delta_old.scale,
-        },
+        files,
+        skipped,
     })
 }
 
-pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
+pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport> {
     let paths = git.list(opts.side)?;
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     let contents: Vec<(String, Vec<u8>)> = paths
@@ -364,37 +328,26 @@ pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
     let kept_contents: Vec<&[u8]> = kept.iter().map(|(_, c)| *c).collect();
 
     let scorer = Scorer::default();
-    let blob = scorer.assemble(&kept_contents);
-    let compressed = scorer.score_absolute(&blob);
-
-    // Per-file contribution: the chain rule over sorted paths against an
-    // empty reference — the same attribution machinery as diff scoring,
-    // with C(tree) itself as the rescale target.
-    let (mut files, scale) = if opts.no_files {
-        (Vec::new(), 1.0)
-    } else {
-        let rescaled = rescale(&scorer.score_sequential(&[], &kept_contents), compressed);
-        let files = kept
-            .iter()
-            .zip(&rescaled.scores)
-            .map(|((path, content), score)| AbsFile {
-                path: (*path).clone(),
-                bytes: score.rescaled,
-                lines: lines(content),
-            })
-            .collect();
-        (files, rescaled.scale)
-    };
-    files.sort_by(|a: &AbsFile, b: &AbsFile| b.bytes.total_cmp(&a.bytes));
+    let pass = scorer.attribution(&[], &kept_contents);
+    let scores = pass.run(progress.bar("C(tree)", pass.bytes()));
+    let mut files: Vec<AbsFile> = kept
+        .iter()
+        .zip(&scores)
+        .map(|((path, content), &bytes)| AbsFile {
+            path: (*path).clone(),
+            bytes,
+            lines: lines(content),
+        })
+        .collect();
+    files.sort_by_key(|f| Reverse(f.bytes));
 
     Ok(AbsReport {
         version: VersionInfo::for_scorer(&scorer),
         snapshot: opts.side.label(),
         file_count: kept.len(),
-        raw_bytes: blob.len() as u64,
-        compressed_bytes: compressed,
+        raw_bytes: pass.bytes(),
+        compressed_bytes: scores.iter().sum(),
         files,
-        scale,
     })
 }
 

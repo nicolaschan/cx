@@ -1,20 +1,17 @@
 //! Pure scoring engine: marginal description length of byte strings,
-//! estimated by zstd compression against a reference prefix.
+//! estimated by zstd compression conditioned on a reference.
 //!
-//! No git, no filesystem, no I/O — callers supply bytes. This is the
-//! WASM-safe boundary; everything here is a pure function of its inputs.
+//! No git, no filesystem, no I/O, no threads — callers supply bytes.
+//! This is the WASM-safe boundary; everything here is a pure function of
+//! its inputs.
 //!
 //! Scores are comparable only within one compressor version + parameter
 //! set. Callers should surface [`zstd_version`] next to any scores.
 
 pub mod testgen;
 
-use zstd_safe::{CCtx, CParameter, compress_bound};
-
-/// Separator inserted between files when assembling references, chosen to
-/// be improbable in real content so zstd matches can't span file
-/// boundaries spuriously.
-pub const SEPARATOR: &[u8] = b"\0CX-SEP\0CX-SEP\0";
+use zstd_safe::zstd_sys::ZSTD_EndDirective::ZSTD_e_flush;
+use zstd_safe::{CCtx, CParameter, InBuffer, OutBuffer};
 
 /// The zstd library version this build scores with, e.g. "1.5.6".
 pub fn zstd_version() -> String {
@@ -22,52 +19,9 @@ pub fn zstd_version() -> String {
     format!("{}.{}.{}", n / 10000, (n / 100) % 100, n % 100)
 }
 
-/// A sequentially-attributed score: the raw compressed size, and the same
-/// score rescaled so that all items in a run sum to their joint total.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SeqScore {
-    pub raw: u64,
-    pub rescaled: f64,
-}
-
-/// Result of [`rescale`]: per-item scores plus the scale factor, which
-/// doubles as a noise gauge (≈ 1.0 → trust per-item attribution).
-#[derive(Clone, Debug)]
-pub struct Rescaled {
-    pub scores: Vec<SeqScore>,
-    pub scale: f64,
-}
-
-/// Rescale raw sequential scores to sum to the joint total. Degenerate
-/// case: when every raw score is 0 (e.g. all pure moves) there is nothing
-/// to attribute, so rescaled scores stay 0 and scale reads 1.0 even if
-/// the joint is a few overhead bytes — the sum-to-joint property holds
-/// only when something scored.
-pub fn rescale(raw: &[u64], joint: u64) -> Rescaled {
-    let sum: u64 = raw.iter().sum();
-    let scale = if sum == 0 {
-        1.0
-    } else {
-        joint as f64 / sum as f64
-    };
-    Rescaled {
-        scores: raw
-            .iter()
-            .map(|&r| SeqScore {
-                raw: r,
-                rescaled: r as f64 * scale,
-            })
-            .collect(),
-        scale,
-    }
-}
-
 pub struct Scorer {
     level: i32,
     max_window_log: u32,
-    /// Compressed size of the empty input under the same parameters:
-    /// pure frame overhead, subtracted from every score.
-    empty_frame: u64,
 }
 
 impl Default for Scorer {
@@ -93,95 +47,97 @@ impl Scorer {
     }
 
     pub fn new(level: i32, max_window_log: u32) -> Self {
-        let mut scorer = Scorer {
+        Scorer {
             level,
             max_window_log,
-            empty_frame: 0,
-        };
-        scorer.empty_frame = scorer.compressed_size(&[], &[]);
-        scorer
-    }
-
-    /// Join parts with [`SEPARATOR`]. Ordering policy belongs to the
-    /// caller: pass parts already in the order they should appear.
-    pub fn assemble(&self, parts: &[&[u8]]) -> Vec<u8> {
-        let total: usize = parts.iter().map(|p| p.len() + SEPARATOR.len()).sum();
-        let mut out = Vec::with_capacity(total);
-        for part in parts {
-            out.extend_from_slice(part);
-            out.extend_from_slice(SEPARATOR);
         }
-        out
     }
 
-    /// C(item_i | reference ++ items[..i]) for each item: sequential
-    /// chain-rule scoring, so a pattern repeated across items is charged
-    /// to its first occurrence and near-free afterwards.
-    pub fn score_sequential(&self, reference: &[u8], items: &[&[u8]]) -> Vec<u64> {
-        let grown: usize = items.iter().map(|i| i.len() + SEPARATOR.len()).sum();
-        let mut prefix = Vec::with_capacity(reference.len() + grown);
-        prefix.extend_from_slice(reference);
-        items
-            .iter()
-            .map(|item| {
-                let size = self.score(&prefix, item);
-                prefix.extend_from_slice(item);
-                prefix.extend_from_slice(SEPARATOR);
-                size
-            })
-            .collect()
+    /// C(input | reference).
+    pub fn score(&self, reference: &[&[u8]], input: &[u8]) -> u64 {
+        self.attribution(reference, &[input]).run(|_| {})[0]
     }
 
-    /// C(all items jointly | reference): one compression of the
-    /// separator-joined items. The rescale target for sequential runs.
-    pub fn score_joint(&self, reference: &[u8], items: &[&[u8]]) -> u64 {
-        self.score(reference, &self.assemble(items))
-    }
-
-    /// Plain C(blob), no reference. The absolute-trend metric.
-    pub fn score_absolute(&self, blob: &[u8]) -> u64 {
-        self.score(&[], blob)
-    }
-
-    fn score(&self, prefix: &[u8], input: &[u8]) -> u64 {
-        self.compressed_size(prefix, input)
-            .saturating_sub(self.empty_frame)
-    }
-
-    fn compressed_size(&self, prefix: &[u8], input: &[u8]) -> u64 {
-        let mut cctx = CCtx::create();
-        let set = |cctx: &mut CCtx, p| {
-            cctx.set_parameter(p).expect("static zstd parameter");
-        };
-        set(&mut cctx, CParameter::CompressionLevel(self.level));
-        // Determinism by construction, not by libzstd's default: MT zstd
-        // changes output sizes.
-        set(&mut cctx, CParameter::NbWorkers(0));
-        set(&mut cctx, CParameter::EnableLongDistanceMatching(true));
-        set(
-            &mut cctx,
-            CParameter::WindowLog(self.window_log(prefix.len() + input.len())),
-        );
-        // Uniform frame overhead: no stored content size, no checksum,
-        // so the empty-frame constant holds for every input size.
-        set(&mut cctx, CParameter::ContentSizeFlag(false));
-        set(&mut cctx, CParameter::ChecksumFlag(false));
-        if !prefix.is_empty() {
-            cctx.ref_prefix(prefix)
-                .expect("ref_prefix accepts any bytes");
+    pub fn attribution<'a>(
+        &'a self,
+        reference: &'a [&'a [u8]],
+        items: &'a [&'a [u8]],
+    ) -> Attribution<'a> {
+        Attribution {
+            scorer: self,
+            reference,
+            items,
         }
-        let mut out: Vec<u8> = Vec::with_capacity(compress_bound(input.len()));
-        let written = cctx
-            .compress2(&mut out, input)
-            .unwrap_or_else(|c| panic!("zstd compress2: {}", zstd_safe::get_error_name(c)));
-        written as u64
     }
 
     /// Smallest window covering the whole reference + input, clamped to
     /// zstd's floor of 10 and this scorer's platform ceiling.
-    fn window_log(&self, total_len: usize) -> u32 {
-        let needed = usize::BITS - total_len.saturating_sub(1).leading_zeros();
+    fn window_log(&self, stream_len: u64) -> u32 {
+        let needed = u64::BITS - stream_len.saturating_sub(1).leading_zeros();
         needed.clamp(10, self.max_window_log)
+    }
+}
+
+/// One zstd stream — reference, then items — flushed at every part
+/// boundary, so an item's score is the bytes its part added:
+/// C(item_i | reference ++ items[..i]). This is chain-rule scoring: a
+/// pattern repeated across items is charged to its first occurrence and
+/// near-free afterwards.
+pub struct Attribution<'a> {
+    scorer: &'a Scorer,
+    reference: &'a [&'a [u8]],
+    items: &'a [&'a [u8]],
+}
+
+impl Attribution<'_> {
+    /// Bytes to compress: the unit `progress` advances in.
+    pub fn bytes(&self) -> u64 {
+        self.reference
+            .iter()
+            .chain(self.items)
+            .map(|part| part.len() as u64)
+            .sum()
+    }
+
+    /// Each item's score; `progress` receives each part's length as it
+    /// finishes, reference parts included.
+    pub fn run(&self, progress: impl Fn(u64)) -> Vec<u64> {
+        let mut cctx = CCtx::create();
+        for p in [
+            CParameter::CompressionLevel(self.scorer.level),
+            // Determinism by construction, not by libzstd's default: MT zstd
+            // changes output sizes.
+            CParameter::NbWorkers(0),
+            CParameter::EnableLongDistanceMatching(true),
+            CParameter::WindowLog(self.scorer.window_log(self.bytes())),
+        ] {
+            cctx.set_parameter(p).expect("static zstd parameter");
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut feed = |part: &[u8]| -> u64 {
+            out.clear();
+            let mut source = InBuffer::around(part);
+            loop {
+                // Room for one more block so every call makes progress;
+                // zstd reports 0 once the part is consumed and flushed.
+                out.reserve(CCtx::out_size());
+                let pos = out.len();
+                let mut sink = OutBuffer::around_pos(&mut out, pos);
+                let pending = cctx
+                    .compress_stream2(&mut sink, &mut source, ZSTD_e_flush)
+                    .unwrap_or_else(|c| panic!("zstd: {}", zstd_safe::get_error_name(c)));
+                if pending == 0 {
+                    break;
+                }
+            }
+            progress(part.len() as u64);
+            out.len() as u64
+        };
+        for part in self.reference {
+            feed(part);
+        }
+        self.items.iter().map(|item| feed(item)).collect()
     }
 }
 
@@ -192,15 +148,15 @@ mod tests {
     #[test]
     fn empty_input_scores_zero() {
         let scorer = Scorer::default();
-        assert_eq!(scorer.score_absolute(&[]), 0);
+        assert_eq!(scorer.score(&[b"reference"], &[]), 0);
     }
 
     #[test]
-    fn window_log_covers_reference() {
+    fn window_log_covers_stream() {
         let scorer = Scorer::new(19, 31);
         assert_eq!(scorer.window_log(1024), 10);
         assert_eq!(scorer.window_log(1 << 20), 20);
         assert_eq!(scorer.window_log((1 << 20) + 1), 21);
-        assert_eq!(scorer.window_log(usize::MAX), 31);
+        assert_eq!(scorer.window_log(u64::MAX), 31);
     }
 }
