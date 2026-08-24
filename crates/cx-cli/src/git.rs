@@ -289,7 +289,14 @@ impl Git {
                 .context("truncated batch header")?;
             let header = std::str::from_utf8(&rest[..nl])?;
             rest = &rest[nl + 1..];
-            if header.ends_with(" missing") || header.ends_with(" ambiguous") {
+            // These header forms carry no body: `missing`/`ambiguous` name
+            // no object, and `submodule` is git's marker for a gitlink,
+            // whose contents live in another repository and are not ours to
+            // count. All three yield no scorable content.
+            if header.ends_with(" missing")
+                || header.ends_with(" ambiguous")
+                || header.ends_with(" submodule")
+            {
                 blobs.push(None);
                 continue;
             }
@@ -304,8 +311,8 @@ impl Git {
             let content = rest
                 .get(..size)
                 .with_context(|| format!("truncated batch content for: {header}"))?;
-            // Only blobs are file content; a gitlink resolves to a commit
-            // object whose text must not leak into references.
+            // Only blobs are file content; any other object type carries
+            // bytes that must not leak into references.
             blobs.push((kind == "blob").then(|| content.to_vec()));
             rest = rest
                 .get(size + 1..) // content + trailing newline

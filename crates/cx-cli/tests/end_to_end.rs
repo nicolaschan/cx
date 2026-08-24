@@ -496,3 +496,59 @@ fn untracked_lines_reach_the_churn_totals() {
         committed.totals.deleted_lines
     );
 }
+
+/// A submodule appears in the tree as a gitlink, which `git cat-file
+/// --batch` reports with a bodyless `<oid> submodule` header. Its contents
+/// live in another repository, so scoring must skip it rather than choke
+/// on the header — anyone who cares about a submodule scores it by cd-ing
+/// into it.
+#[test]
+fn a_submodule_is_skipped_not_fatal() {
+    let (dir, repo) = setup();
+    let root = dir.path();
+
+    // A standalone repo to embed. A relative path keeps it inside the
+    // fixture; `protocol.file.allow` is required for local submodules.
+    let upstream = root.join("upstream");
+    fs::create_dir(&upstream).unwrap();
+    git(&upstream, &["init", "-q", "-b", "main"]);
+    fs::write(upstream.join("lib.rs"), gen_code(55, 120)).unwrap();
+    git(&upstream, &["add", "-A"]);
+    git(&upstream, &["commit", "-q", "-m", "upstream"]);
+
+    let url = upstream.to_str().unwrap();
+    git(
+        root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            url,
+            "vendor/sub",
+        ],
+    );
+    git(root, &["commit", "-q", "-m", "add submodule"]);
+
+    // Both scoring passes must succeed with the gitlink present...
+    let abs = pipeline::abs(&repo, &AbsOptions::default(), Progress::default()).unwrap();
+    let diff = pipeline::diff(
+        &repo,
+        &DiffOptions {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+
+    // ...and neither must have counted the submodule as a file.
+    assert!(
+        !abs.files.iter().any(|f| f.path == "vendor/sub"),
+        "submodule must not be scored in abs"
+    );
+    assert!(
+        !diff.files.iter().any(|f| f.path == "vendor/sub"),
+        "submodule must not be scored in diff"
+    );
+}
