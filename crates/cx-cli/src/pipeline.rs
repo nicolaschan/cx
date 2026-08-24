@@ -1,37 +1,33 @@
 //! Orchestrates a scoring run: resolve refs, fetch blobs, filter, build
-//! the two references, run the three metric passes, rescale.
+//! the two references, run the three metric passes.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
-use cx_core::{Scorer, rescale};
+use cx_core::Scorer;
 use serde::Serialize;
 
 use crate::filter::Filter;
 use crate::git::{Git, Side, Status};
+use crate::progress::Progress;
 use crate::strip;
 
 const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/master"];
 
-/// What is scored: which snapshot, and which kinds of content count.
-#[derive(Clone, Copy, Default)]
-pub struct Scope {
+#[derive(Default)]
+pub struct DiffOptions {
+    pub base: Option<String>,
     pub side: Side,
-    /// Exclude test files from the universe entirely — they are then in
-    /// no reference and no scoring pass, and appear as skipped.
-    pub ignore_tests: bool,
+    /// Score test files too. Otherwise they leave the universe entirely:
+    /// in no reference and no scoring pass, and reported as skipped.
+    pub include_tests: bool,
     /// Score comments too. Otherwise every blob is reduced to code before
     /// it enters any reference or scoring pass.
     pub comments: bool,
     /// Score prose files (Markdown, reStructuredText, …) too. Otherwise
-    /// they appear as skipped.
+    /// they are skipped, like tests.
     pub prose: bool,
-}
-
-#[derive(Default)]
-pub struct DiffOptions {
-    pub base: Option<String>,
-    pub scope: Scope,
 }
 
 #[derive(Serialize)]
@@ -62,11 +58,10 @@ pub struct DiffFile {
     /// "renamed from <path>".
     #[serde(serialize_with = "serialize_status")]
     pub status: Status,
-    /// Metric 1, rescaled: what the reviewer must newly absorb.
-    pub review_bytes: f64,
-    pub review_raw: u64,
-    /// Metric 2, rescaled: complexity added (+) or removed (−).
-    pub delta_bytes: f64,
+    /// Metric 1: what the reviewer must newly absorb.
+    pub review_bytes: u64,
+    /// Metric 2: complexity added (+) or removed (−).
+    pub delta_bytes: i64,
     pub new_lines: u64,
     /// review_bytes / new_lines — density separates tables from
     /// algorithms. Only defined for added files, where all lines are
@@ -101,10 +96,10 @@ fn lines(content: &[u8]) -> u64 {
 /// needs them); everything after sees code only.
 type Prepared = Result<Vec<u8>, &'static str>;
 
-fn prepare(filter: &Filter, scope: &Scope, path: &str, raw: Vec<u8>) -> Prepared {
+fn prepare(filter: &Filter, comments: bool, path: &str, raw: Vec<u8>) -> Prepared {
     match filter.exclusion(path, &raw) {
         Some(reason) => Err(reason),
-        None if scope.comments => Ok(raw),
+        None if comments => Ok(raw),
         None => Ok(strip::code_only(path, raw)),
     }
 }
@@ -114,7 +109,7 @@ fn prepare(filter: &Filter, scope: &Scope, path: &str, raw: Vec<u8>) -> Prepared
 /// simply absent.
 fn load<'a>(
     filter: &Filter,
-    scope: &Scope,
+    comments: bool,
     paths: &[&'a str],
     blobs: Vec<Option<Vec<u8>>>,
 ) -> Vec<(&'a str, Prepared)> {
@@ -122,20 +117,13 @@ fn load<'a>(
         .iter()
         .copied()
         .zip(blobs)
-        .filter_map(|(path, blob)| Some((path, prepare(filter, scope, path, blob?))))
+        .filter_map(|(path, blob)| Some((path, prepare(filter, comments, path, blob?))))
         .collect()
 }
 
 /// The code of a prepared blob, or None if it was dropped (or absent).
 fn code(prepared: Option<&Prepared>) -> Option<&[u8]> {
     prepared?.as_deref().ok()
-}
-
-#[derive(Serialize)]
-pub struct Scales {
-    pub review: f64,
-    pub delta_new: f64,
-    pub delta_old: f64,
 }
 
 #[derive(Serialize)]
@@ -146,23 +134,25 @@ pub struct DiffReport {
     pub files: Vec<DiffFile>,
     pub skipped: Vec<Skipped>,
     pub totals: Totals,
-    pub scales: Scales,
 }
 
 #[derive(Default)]
 pub struct AbsOptions {
-    /// Skip per-file contributions, leaving one joint compression —
-    /// much faster on big trees.
-    pub no_files: bool,
-    pub scope: Scope,
+    /// Score test files too; otherwise they leave the universe entirely.
+    pub include_tests: bool,
+    /// Score comments too; otherwise every blob is reduced to code first.
+    pub comments: bool,
+    /// Score prose files too; otherwise they are skipped.
+    pub prose: bool,
+    pub side: Side,
 }
 
 /// One file's contribution to C(tree): its sequential chain-rule score in
-/// sorted-path order, rescaled so contributions sum to the joint total.
+/// sorted-path order.
 #[derive(Serialize)]
 pub struct AbsFile {
     pub path: String,
-    pub bytes: f64,
+    pub bytes: u64,
     pub lines: u64,
 }
 
@@ -173,10 +163,7 @@ pub struct AbsReport {
     pub file_count: usize,
     pub raw_bytes: u64,
     pub compressed_bytes: u64,
-    /// Empty when contributions were suppressed.
     pub files: Vec<AbsFile>,
-    /// Attribution noise gauge for `files`; 1.0 when suppressed.
-    pub scale: f64,
 }
 
 /// One changed file with whichever sides exist and passed the filter.
@@ -198,12 +185,11 @@ fn serialize_status<S: serde::Serializer>(status: &Status, s: S) -> Result<S::Ok
     })
 }
 
-pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
+pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffReport> {
     let base = resolve_base(git, opts.base.as_deref())?;
     let merge_base = git.merge_base(&base, "HEAD")?;
-    let changes = git.changes(&merge_base, opts.scope.side)?;
+    let changes = git.changes(&merge_base, opts.side)?;
 
-    let scope = &opts.scope;
     let tree_paths = git.ls_tree(&merge_base)?;
     let tree_refs: Vec<&str> = tree_paths.iter().map(String::as_str).collect();
     let new_side_paths: Vec<&str> = changes
@@ -216,13 +202,18 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
         .cloned()
         .chain(new_side_paths.iter().map(|p| p.to_string()))
         .collect();
-    let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?, scope)?;
+    let filter = Filter::new(
+        git.root(),
+        git.linguist_attrs(&attr_paths)?,
+        opts.include_tests,
+        opts.prose,
+    )?;
 
     // The whole old tree plus the new side of every change, each blob
     // filtered and reduced to code once.
     let old_tree: HashMap<&str, Prepared> = load(
         &filter,
-        scope,
+        opts.comments,
         &tree_refs,
         git.tree_contents(&merge_base, &tree_refs)?,
     )
@@ -230,9 +221,9 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     .collect();
     let new_contents: HashMap<&str, Prepared> = load(
         &filter,
-        scope,
+        opts.comments,
         &new_side_paths,
-        git.contents(scope.side, &new_side_paths)?,
+        git.contents(opts.side, &new_side_paths)?,
     )
     .into_iter()
     .collect();
@@ -289,66 +280,49 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
     items.sort_by(|a, b| a.path.cmp(&b.path));
 
     let scorer = Scorer::default();
-    let old_tree_ref = scorer.assemble(&kept_tree.iter().map(|(_, c)| *c).collect::<Vec<_>>());
+    let tree: Vec<&[u8]> = kept_tree.iter().map(|(_, c)| *c).collect();
     let remainder: Vec<&[u8]> = kept_tree
         .iter()
         .filter(|(p, _)| !touched.contains(p))
         .map(|(_, c)| *c)
         .collect();
-    let remainder_ref = scorer.assemble(&remainder);
 
-    // The three passes (plan §3): metric 1 against the full old tree,
-    // metric 2 as new-vs-old against the neutral remainder, metric 3 as
-    // joint compressions that are also the rescale targets.
-    let new_items: Vec<&[u8]> = items.iter().filter_map(|i| i.new).collect();
-    let old_items: Vec<&[u8]> = items.iter().filter_map(|i| i.old).collect();
-
-    let review_seq = scorer.score_sequential(&old_tree_ref, &new_items);
-    let review_joint = scorer.score_joint(&old_tree_ref, &new_items);
-    let review = rescale(&review_seq, review_joint);
-
-    let delta_new_seq = scorer.score_sequential(&remainder_ref, &new_items);
-    let delta_new_joint = scorer.score_joint(&remainder_ref, &new_items);
-    let delta_new = rescale(&delta_new_seq, delta_new_joint);
-
-    let delta_old_seq = scorer.score_sequential(&remainder_ref, &old_items);
-    let delta_old_joint = scorer.score_joint(&remainder_ref, &old_items);
-    let delta_old = rescale(&delta_old_seq, delta_old_joint);
+    // Metric 1 is new against the full old tree; metric 2 is new minus
+    // old, each against the neutral remainder. A missing side is the
+    // empty file, which scores 0, so every pass is indexed like `items`.
+    let new_items: Vec<&[u8]> = items.iter().map(|i| i.new.unwrap_or_default()).collect();
+    let old_items: Vec<&[u8]> = items.iter().map(|i| i.old.unwrap_or_default()).collect();
+    let passes = [
+        scorer.attribution(&tree, &new_items),
+        scorer.attribution(&remainder, &new_items),
+        scorer.attribution(&remainder, &old_items),
+    ];
+    let bar = &progress.bar("diff", passes.iter().map(|pass| pass.bytes()).sum());
+    let [review, delta_new, delta_old] = std::thread::scope(|scope| {
+        passes
+            .each_ref()
+            .map(|pass| scope.spawn(move || pass.run(bar)))
+            .map(|stream| stream.join().expect("stream thread"))
+    });
 
     let mut files = Vec::with_capacity(items.len());
-    let (mut new_i, mut old_i) = (0, 0);
-    for item in &items {
-        let (review_bytes, review_raw, new_delta) = if item.new.is_some() {
-            let r = (review.scores[new_i], delta_new.scores[new_i]);
-            new_i += 1;
-            (r.0.rescaled, r.0.raw, r.1.rescaled)
-        } else {
-            (0.0, 0, 0.0)
-        };
-        let old_delta = if item.old.is_some() {
-            let d = delta_old.scores[old_i].rescaled;
-            old_i += 1;
-            d
-        } else {
-            0.0
-        };
-        let new_lines = item.new.map_or(0, lines);
+    for (i, item) in items.iter().enumerate() {
+        let new_lines = lines(new_items[i]);
         files.push(DiffFile {
             path: item.path.clone(),
             status: item.status.clone(),
-            review_bytes,
-            review_raw,
-            delta_bytes: new_delta - old_delta,
+            review_bytes: review[i],
+            delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
             new_lines,
             bytes_per_line: (item.status == Status::Added && new_lines > 0)
-                .then(|| review_bytes / new_lines as f64),
+                .then(|| review[i] as f64 / new_lines as f64),
             density_outlier: false,
         });
     }
     flag_density_outliers(&mut files);
-    files.sort_by(|a, b| b.review_bytes.total_cmp(&a.review_bytes));
+    files.sort_by_key(|f| Reverse(f.review_bytes));
 
-    let churn = git.line_counts(&merge_base, opts.scope.side)?;
+    let churn = git.line_counts(&merge_base, opts.side)?;
     let (added_lines, deleted_lines) = items
         .iter()
         .filter_map(|item| churn.get(&item.path))
@@ -358,71 +332,61 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
         version: VersionInfo::for_scorer(&scorer),
         base,
         merge_base,
-        files,
-        skipped,
         totals: Totals {
-            review_bytes: review_joint,
-            delta_bytes: delta_new_joint as i64 - delta_old_joint as i64,
+            review_bytes: files.iter().map(|f| f.review_bytes).sum(),
+            delta_bytes: files.iter().map(|f| f.delta_bytes).sum(),
             added_lines,
             deleted_lines,
         },
-        scales: Scales {
-            review: review.scale,
-            delta_new: delta_new.scale,
-            delta_old: delta_old.scale,
-        },
+        files,
+        skipped,
     })
 }
 
-pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
-    let scope = &opts.scope;
-    let paths = git.list(scope.side)?;
+pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport> {
+    let paths = git.list(opts.side)?;
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-    let blobs = git.contents(scope.side, &path_refs)?;
+    let blobs = git.contents(opts.side, &path_refs)?;
     let attr_paths: Vec<String> = path_refs
         .iter()
         .zip(&blobs)
         .filter_map(|(p, b)| b.as_ref().map(|_| p.to_string()))
         .collect();
-    let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?, scope)?;
-    let kept: Vec<(&str, Vec<u8>)> = load(&filter, scope, &path_refs, blobs)
+    let filter = Filter::new(
+        git.root(),
+        git.linguist_attrs(&attr_paths)?,
+        opts.include_tests,
+        opts.prose,
+    )?;
+    // Each kept blob, filtered and reduced to code, in the order
+    // `git.list` produced — already sorted, which the chain rule wants.
+    let kept: Vec<(&str, Vec<u8>)> = load(&filter, opts.comments, &path_refs, blobs)
         .into_iter()
         .filter_map(|(p, prepared)| Some((p, prepared.ok()?)))
         .collect();
     let kept_contents: Vec<&[u8]> = kept.iter().map(|(_, c)| c.as_slice()).collect();
 
     let scorer = Scorer::default();
-    let blob = scorer.assemble(&kept_contents);
-    let compressed = scorer.score_absolute(&blob);
-
-    // Per-file contribution: the chain rule over sorted paths against an
-    // empty reference — the same attribution machinery as diff scoring,
-    // with C(tree) itself as the rescale target.
-    let (mut files, scale) = if opts.no_files {
-        (Vec::new(), 1.0)
-    } else {
-        let rescaled = rescale(&scorer.score_sequential(&[], &kept_contents), compressed);
-        let files = kept
-            .iter()
-            .zip(&rescaled.scores)
-            .map(|((path, content), score)| AbsFile {
-                path: (*path).to_owned(),
-                bytes: score.rescaled,
-                lines: lines(content),
-            })
-            .collect();
-        (files, rescaled.scale)
-    };
-    files.sort_by(|a: &AbsFile, b: &AbsFile| b.bytes.total_cmp(&a.bytes));
+    let pass = scorer.attribution(&[], &kept_contents);
+    let scores = pass.run(progress.bar("C(tree)", pass.bytes()));
+    let mut files: Vec<AbsFile> = kept
+        .iter()
+        .zip(&scores)
+        .map(|((path, content), &bytes)| AbsFile {
+            path: (*path).to_owned(),
+            bytes,
+            lines: lines(content),
+        })
+        .collect();
+    files.sort_by_key(|f| Reverse(f.bytes));
 
     Ok(AbsReport {
         version: VersionInfo::for_scorer(&scorer),
-        snapshot: opts.scope.side.label(),
+        snapshot: opts.side.label(),
         file_count: kept.len(),
-        raw_bytes: blob.len() as u64,
-        compressed_bytes: compressed,
+        raw_bytes: pass.bytes(),
+        compressed_bytes: scores.iter().sum(),
         files,
-        scale,
     })
 }
 
@@ -441,9 +405,9 @@ fn resolve_base(git: &Git, requested: Option<&str>) -> Result<String> {
     bail!("no main/master branch found; pass --base <ref>")
 }
 
-/// The density backstop of the filter stack (see `filter.rs`): flag
-/// (never drop) files whose density is far off this run's median —
-/// probable generated/vendored content that no pattern anticipated.
+/// Layer 5 of the filter stack: flag (never drop) files whose density is
+/// far off this run's median — probable generated/vendored content that
+/// no pattern anticipated.
 fn flag_density_outliers(files: &mut [DiffFile]) {
     let mut densities: Vec<f64> = files
         .iter()

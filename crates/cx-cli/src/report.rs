@@ -36,7 +36,7 @@ fn entry<'a>(path: &'a str, bytes: f64, lines: u64, change: Option<&DiffFile>) -
         path,
         bytes,
         lines,
-        delta: change.map(|c| c.delta_bytes),
+        delta: change.map(|c| c.delta_bytes as f64),
         marker: change.and_then(status_marker),
     }
 }
@@ -191,7 +191,7 @@ fn view<'a>(
         return footer;
     }
     let columns: &[&str] = match diff_columns {
-        Some(bytes_header) => &[bytes_header, "ΔC", "", "LINES", "PATH", "SHARE"],
+        Some(bytes_header) => &[bytes_header, "ΔCX", "", "LINES", "PATH", "SHARE"],
         None => &["BYTES", "LINES", "PATH", "SHARE"],
     };
     let mut table = Table::new();
@@ -230,7 +230,7 @@ fn footer(
             summary.push(opts.dim(format!("no scorable changes against {}", diff.base)));
         } else {
             summary.push(opts.stat("review", fmt_bytes(review), score_color(review)));
-            summary.push(opts.stat("ΔC", fmt_signed(delta), score_color(delta)));
+            summary.push(opts.stat("ΔCX", fmt_signed(delta), score_color(delta)));
             let (added, deleted) = (diff.totals.added_lines, diff.totals.deleted_lines);
             summary.push(opts.stat("lines", format!("+{added} −{deleted}"), None));
         }
@@ -246,47 +246,13 @@ fn footer(
     }
     let mut lines = vec![summary.join("   ")];
     if opts.verbose {
-        details.push(format!(
-            "{}   {}",
-            scale_gauge(opts, abs, diff),
-            opts.dim(format!(
-                "zstd {}, level {}, window≤2^{}",
-                version.zstd, version.level, version.max_window_log
-            )),
-        ));
+        details.push(opts.dim(format!(
+            "zstd {}, level {}, window≤2^{}",
+            version.zstd, version.level, version.max_window_log
+        )));
         lines.append(&mut details);
     }
     lines.iter().map(|line| format!(" {line}\n")).collect()
-}
-
-fn scale_gauge(opts: Options, abs: Option<&AbsReport>, diff: Option<&DiffReport>) -> String {
-    let scales = diff
-        .into_iter()
-        .flat_map(|d| [d.scales.review, d.scales.delta_new, d.scales.delta_old]);
-    let worst = abs
-        .map(|a| a.scale)
-        .into_iter()
-        .chain(scales)
-        .fold(1.0f64, |acc, s| {
-            if (s - 1.0).abs() > (acc - 1.0).abs() {
-                s
-            } else {
-                acc
-            }
-        });
-    let (verdict, color) = if (0.7..=1.1).contains(&worst) {
-        ("ok", Color::Green)
-    } else {
-        (
-            "noisy — trust totals, not per-file attribution",
-            Color::Yellow,
-        )
-    };
-    opts.stat(
-        "attribution scale:",
-        format!("{worst:.2} ({verdict})"),
-        Some(color),
-    )
 }
 
 pub fn render_diff(report: &DiffReport, opts: Options) -> String {
@@ -294,7 +260,7 @@ pub fn render_diff(report: &DiffReport, opts: Options) -> String {
     let entries = report
         .files
         .iter()
-        .map(|f| entry(&f.path, f.review_bytes, f.new_lines, Some(f)));
+        .map(|f| entry(&f.path, f.review_bytes as f64, f.new_lines, Some(f)));
     view(
         entries,
         total,
@@ -310,7 +276,14 @@ pub fn render_overview(abs: &AbsReport, diff: &DiffReport, opts: Options) -> Str
     let mut entries: Vec<Entry> = abs
         .files
         .iter()
-        .map(|f| entry(&f.path, f.bytes, f.lines, changed.remove(f.path.as_str())))
+        .map(|f| {
+            entry(
+                &f.path,
+                f.bytes as f64,
+                f.lines,
+                changed.remove(f.path.as_str()),
+            )
+        })
         .collect();
     entries.extend(
         changed
@@ -333,7 +306,7 @@ pub fn render_abs(report: &AbsReport, opts: Options) -> String {
     let entries = report
         .files
         .iter()
-        .map(|f| entry(&f.path, f.bytes, f.lines, None));
+        .map(|f| entry(&f.path, f.bytes as f64, f.lines, None));
     view(
         entries,
         total,
@@ -368,7 +341,7 @@ fn fmt_signed(bytes: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{AbsFile, Scales, Skipped, Totals};
+    use crate::pipeline::{AbsFile, Skipped, Totals};
 
     fn version() -> VersionInfo {
         VersionInfo {
@@ -389,16 +362,15 @@ mod tests {
             files: vec![
                 AbsFile {
                     path: "src/a.rs".into(),
-                    bytes: 8192.0,
+                    bytes: 8192,
                     lines: 200,
                 },
                 AbsFile {
                     path: "src/b.rs".into(),
-                    bytes: 2048.0,
+                    bytes: 2048,
                     lines: 50,
                 },
             ],
-            scale: 0.95,
         }
     }
 
@@ -406,9 +378,8 @@ mod tests {
         DiffFile {
             path: "src/a.rs".into(),
             status,
-            review_bytes: 2048.0,
-            review_raw: 4096,
-            delta_bytes: 1024.0,
+            review_bytes: 2048,
+            delta_bytes: 1024,
             new_lines: 40,
             bytes_per_line: None,
             density_outlier,
@@ -431,11 +402,6 @@ mod tests {
                 added_lines: 40,
                 deleted_lines: 12,
             },
-            scales: Scales {
-                review: 1.0,
-                delta_new: 1.0,
-                delta_old: 1.0,
-            },
         }
     }
 
@@ -446,7 +412,7 @@ mod tests {
         color: false,
     };
     const SUMMARY: &str =
-        " C(tree) 10.0 KB   review 2.0 KB   ΔC +1.0 KB   lines +40 −12   1 skipped\n";
+        " C(tree) 10.0 KB   review 2.0 KB   ΔCX +1.0 KB   lines +40 −12   1 skipped\n";
 
     /// Everything the overview prints below its table.
     fn footer(abs: &AbsReport, diff: &DiffReport, opts: Options) -> String {
@@ -473,24 +439,8 @@ mod tests {
                 "{SUMMARY}\
                  \x20C(tree) over 2 files (40.0 KB raw)\n\
                  \x20skipped: Cargo.lock (generated/vendored pattern)\n\
-                 \x20attribution scale: 0.95 (ok)   zstd 1.5.7, level 19, window≤2^31\n"
+                 \x20zstd 1.5.7, level 19, window≤2^31\n"
             )
-        );
-    }
-
-    /// The gauge covers every pass the view merged, not just the diff's.
-    #[test]
-    fn attribution_gauge_reports_the_noisiest_scale() {
-        let mut abs = abs_report();
-        abs.scale = 0.4;
-        let opts = Options {
-            verbose: true,
-            ..OPTS
-        };
-        let footer = footer(&abs, &diff_report(), opts);
-        assert!(
-            footer.contains("attribution scale: 0.40 (noisy"),
-            "{footer}"
         );
     }
 
@@ -523,7 +473,7 @@ mod tests {
             format!(
                 " {grey}C(tree){reset} 10.0 KB   \
                  {grey}review{reset} {yellow}2.0 KB{reset}   \
-                 {grey}ΔC{reset} {yellow}+1.0 KB{reset}   \
+                 {grey}ΔCX{reset} {yellow}+1.0 KB{reset}   \
                  {grey}lines{reset} +40 −12   \
                  {grey}1 skipped{reset}\n"
             )

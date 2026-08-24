@@ -24,11 +24,11 @@ fn golden_scores() {
     );
     let s = Scorer::default();
 
-    assert_eq!(s.score_absolute(REFERENCE), 60);
-    assert_eq!(s.score_absolute(NOVEL), 83);
+    let scores = s
+        .attribution(&[REFERENCE], &[NOVEL, CONVENTIONAL])
+        .run(|_| {});
     assert_eq!(
-        s.score_sequential(REFERENCE, &[NOVEL, CONVENTIONAL]),
-        vec![77, 19]
+        (s.score(&[], REFERENCE), s.score(&[], NOVEL), scores),
+        (69, 92, vec![80, 22])
     );
-    assert_eq!(s.score_joint(REFERENCE, &[NOVEL, CONVENTIONAL]), 103);
 }

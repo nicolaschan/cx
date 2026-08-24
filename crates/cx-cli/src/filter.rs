@@ -3,11 +3,10 @@
 //! 2. binary detection on content (UTF-16/32 aware)
 //! 3. ported linguist generated/vendored patterns
 //! 4. prose, unless `--prose` asks to keep it
-//! 5. test files, when `--ignore-tests` asks for it
+//! 5. test files, unless `--include-tests` asks to keep them
 //! 6. `.cxignore`
 //!
-//! The density backstop (layer 7) lives in the report, not here — it
-//! flags, it doesn't drop.
+//! The density backstop (in the report, not here) flags, it doesn't drop.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,7 +19,6 @@ use tokei::LanguageType;
 
 use crate::git::LinguistAttrs;
 use crate::language;
-use crate::pipeline::Scope;
 
 /// Patterns ported from linguist's generated.rb / vendor.yml — the ~15
 /// that cover 95% of real repos.
@@ -119,7 +117,7 @@ fn is_test_path(path: &str) -> bool {
 pub struct Filter {
     attrs: HashMap<String, LinguistAttrs>,
     patterns: GlobSet,
-    ignore_tests: bool,
+    include_tests: bool,
     prose: bool,
     cxignore: Option<Gitignore>,
 }
@@ -135,7 +133,12 @@ fn glob_set(patterns: &[&str]) -> Result<GlobSet> {
 }
 
 impl Filter {
-    pub fn new(root: &Path, attrs: HashMap<String, LinguistAttrs>, scope: &Scope) -> Result<Self> {
+    pub fn new(
+        root: &Path,
+        attrs: HashMap<String, LinguistAttrs>,
+        include_tests: bool,
+        prose: bool,
+    ) -> Result<Self> {
         let cxignore_path = root.join(".cxignore");
         let cxignore = cxignore_path.exists().then(|| {
             let mut b = GitignoreBuilder::new(root);
@@ -145,8 +148,8 @@ impl Filter {
         Ok(Filter {
             attrs,
             patterns: glob_set(&LINGUIST_PATTERNS)?,
-            ignore_tests: scope.ignore_tests,
-            prose: scope.prose,
+            include_tests,
+            prose,
             cxignore: cxignore.transpose()?,
         })
     }
@@ -174,7 +177,7 @@ impl Filter {
         if !self.prose && is_prose(path, content) {
             return Some("prose");
         }
-        if self.ignore_tests && is_test_path(path) {
+        if !self.include_tests && is_test_path(path) {
             return Some("test");
         }
         if let Some(ig) = &self.cxignore
@@ -189,10 +192,10 @@ impl Filter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::Scope;
 
+    /// The default filter: tests excluded.
     fn filter() -> Filter {
-        Filter::new(Path::new("/nonexistent"), HashMap::new(), &Scope::default()).unwrap()
+        Filter::new(Path::new("/nonexistent"), HashMap::new(), false, false).unwrap()
     }
 
     #[test]
@@ -225,8 +228,7 @@ mod tests {
         );
         // UTF-16LE "hello" with BOM: full of NULs, but text. Named
         // `blob.bin` rather than `readme.txt` so this stays a
-        // binary-detection test and doesn't also exercise the prose
-        // layer.
+        // binary-detection test and doesn't also exercise the prose layer.
         let utf16 = b"\xff\xfeh\0e\0l\0l\0o\0";
         assert_eq!(f.exclusion("blob.bin", utf16), None);
     }
@@ -241,7 +243,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let f = Filter::new(Path::new("/nonexistent"), attrs, &Scope::default()).unwrap();
+        let f = Filter::new(Path::new("/nonexistent"), attrs, false, false).unwrap();
         assert_eq!(
             f.exclusion("src/schema.rs", b"code"),
             Some("linguist-generated")
@@ -256,10 +258,12 @@ mod tests {
     }
 
     #[test]
-    fn keeps_tests_unless_asked_to_ignore_them() {
-        let f = filter();
+    fn drops_tests_unless_asked_to_include_them() {
+        let including =
+            Filter::new(Path::new("/nonexistent"), HashMap::new(), true, false).unwrap();
         for path in ["tests/e2e.rs", "src/parser_test.go", "web/app.spec.ts"] {
-            assert_eq!(f.exclusion(path, b"code"), None, "{path} kept by default");
+            assert_eq!(filter().exclusion(path, b"code"), Some("test"), "{path}");
+            assert_eq!(including.exclusion(path, b"code"), None, "{path} included");
         }
     }
 
@@ -269,15 +273,7 @@ mod tests {
     /// knows (`conftest.py`, `FooTest.java`) go undetected.
     #[test]
     fn detects_tests_by_naming_convention() {
-        let f = Filter::new(
-            Path::new("/nonexistent"),
-            HashMap::new(),
-            &Scope {
-                ignore_tests: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let f = filter();
         for (path, is_test) in [
             // Test directories, at any depth, any separator, any case.
             ("tests/end_to_end.rs", true),
@@ -310,6 +306,9 @@ mod tests {
             ("api/conftest.py", false),
             ("src/main/java/FooTest.java", false),
         ] {
+            // Compare against the specific reason, not `is_some`: the
+            // documents-about-tests rows are `.md`, which the earlier prose
+            // layer catches, so `is_some` would conflate prose with test.
             assert_eq!(
                 f.exclusion(path, b"code") == Some("test"),
                 is_test,
@@ -358,31 +357,16 @@ mod tests {
             assert_eq!(f.exclusion(path, b"code"), None, "{path}");
         }
 
-        let keep = Filter::new(
-            Path::new("/nonexistent"),
-            HashMap::new(),
-            &Scope {
-                prose: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let keep = Filter::new(Path::new("/nonexistent"), HashMap::new(), false, true).unwrap();
         assert_eq!(keep.exclusion("README.md", b"words"), None);
         assert_eq!(keep.exclusion("LICENSE", b"words"), None);
     }
 
-    /// A prose document about tests is prose first.
+    /// A prose document about tests is prose first (prose precedes the
+    /// test layer), whether or not tests are being scored.
     #[test]
     fn prose_is_recognised_before_tests() {
-        let f = Filter::new(
-            Path::new("/nonexistent"),
-            HashMap::new(),
-            &Scope {
-                ignore_tests: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let f = filter();
         assert_eq!(f.exclusion("docs/tests/plan.md", b"words"), Some("prose"));
     }
 }

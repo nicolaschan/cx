@@ -5,13 +5,14 @@ use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use cx_cli::git::{Git, Side};
-use cx_cli::pipeline::{self, AbsOptions, DiffOptions, Scope};
+use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::progress::Progress;
 use cx_cli::report;
 
 /// Score git trees and diffs by marginal description length: how much
 /// new information content adds, conditioned on what the codebase
 /// already contains. With no subcommand, shows one merged breakdown:
-/// the tree's complexity per file/directory plus the diff's ΔC.
+/// the tree's complexity per file/directory plus the diff's ΔCX.
 #[derive(Parser)]
 #[command(name = "cx", version)]
 struct Cli {
@@ -34,18 +35,18 @@ struct CommonArgs {
     /// working tree.
     #[arg(long)]
     committed: bool,
-    /// Exclude test files everywhere, by naming convention. Takes an
-    /// optional value so a pinned default can be vetoed for one run:
-    /// `--ignore-tests=false`.
+    /// Score test files too. They are excluded by default, by naming
+    /// convention. Takes an optional value so a pinned default can be
+    /// vetoed for one run: `--include-tests=false`.
     #[arg(
         long,
-        env = "CX_IGNORE_TESTS",
+        env = "CX_INCLUDE_TESTS",
         num_args = 0..=1,
         default_value_t = false,
         default_missing_value = "true",
         value_parser = BoolishValueParser::new(),
     )]
-    ignore_tests: bool,
+    include_tests: bool,
     /// Score comments too. By default every file is reduced to code —
     /// comments stripped, blank lines dropped — before scoring. Takes an
     /// optional value so a pinned default can be vetoed for one run:
@@ -78,8 +79,7 @@ struct CommonArgs {
     /// Show only the N biggest files/directories in the breakdown.
     #[arg(short = 'n', long, env = "CX_TOP", default_value_t = 30)]
     top: usize,
-    /// Also show attribution scale, compressor provenance, and the
-    /// skipped files by name.
+    /// Also show compressor provenance and the skipped files by name.
     #[arg(short = 'v', long)]
     verbose: bool,
     #[arg(long)]
@@ -98,32 +98,31 @@ impl DiffArgs {
     fn options(self, common: &CommonArgs) -> DiffOptions {
         DiffOptions {
             base: self.base,
-            scope: common.scope(),
+            side: common.side(),
+            include_tests: common.include_tests,
+            comments: common.comments,
+            prose: common.prose,
         }
     }
 }
 
 impl CommonArgs {
-    fn scope(&self) -> Scope {
-        let side = if self.committed {
+    fn side(&self) -> Side {
+        if self.committed {
             Side::Head
         } else if self.staged {
             Side::Index
         } else {
             Side::Worktree
-        };
-        Scope {
-            side,
-            ignore_tests: self.ignore_tests,
-            comments: self.comments,
-            prose: self.prose,
         }
     }
 
     fn abs_options(&self) -> AbsOptions {
         AbsOptions {
-            no_files: self.no_files,
-            scope: self.scope(),
+            include_tests: self.include_tests,
+            comments: self.comments,
+            prose: self.prose,
+            side: self.side(),
         }
     }
 
@@ -175,11 +174,14 @@ fn emit<T: serde::Serialize>(json: bool, value: &T, rendered: String) -> Result<
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let git = Git::discover()?;
+    let progress = Progress {
+        visible: std::io::stderr().is_terminal(),
+    };
     match cli.cmd {
         None => {
             let common = cli.common;
-            let abs = pipeline::abs(&git, &common.abs_options())?;
-            let diff = pipeline::diff(&git, &cli.diff.options(&common))?;
+            let abs = pipeline::abs(&git, &common.abs_options(), progress)?;
+            let diff = pipeline::diff(&git, &cli.diff.options(&common), progress)?;
             emit(
                 common.json,
                 &serde_json::json!({ "abs": abs, "diff": diff }),
@@ -194,7 +196,7 @@ fn main() -> Result<()> {
             if matches!(granularity, Granularity::Hunk) {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
-            let report = pipeline::diff(&git, &diff.options(&common))?;
+            let report = pipeline::diff(&git, &diff.options(&common), progress)?;
             emit(
                 common.json,
                 &report,
@@ -202,7 +204,7 @@ fn main() -> Result<()> {
             )?;
         }
         Some(Cmd::Abs { common }) => {
-            let report = pipeline::abs(&git, &common.abs_options())?;
+            let report = pipeline::abs(&git, &common.abs_options(), progress)?;
             emit(
                 common.json,
                 &report,
