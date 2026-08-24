@@ -46,6 +46,19 @@ struct CommonArgs {
         value_parser = BoolishValueParser::new(),
     )]
     ignore_tests: bool,
+    /// Score prose files too — Markdown, reStructuredText, plain text,
+    /// AsciiDoc, Org, and extensionless documents such as LICENSE. By
+    /// default they are skipped. Takes an optional value so a pinned
+    /// default can be vetoed for one run: `--prose=false`.
+    #[arg(
+        long,
+        env = "CX_PROSE",
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = BoolishValueParser::new(),
+    )]
+    prose: bool,
     /// Hide the per-file breakdown; show the summary line only.
     #[arg(long)]
     no_files: bool,
@@ -90,7 +103,7 @@ impl CommonArgs {
             side,
             ignore_tests: self.ignore_tests,
             comments: false,
-            prose: false,
+            prose: self.prose,
         }
     }
 

@@ -194,11 +194,7 @@ pub fn diff(git: &Git, opts: &DiffOptions) -> Result<DiffReport> {
         .cloned()
         .chain(new_side_paths.iter().map(|p| p.to_string()))
         .collect();
-    let filter = Filter::new(
-        git.root(),
-        git.linguist_attrs(&attr_paths)?,
-        opts.scope.ignore_tests,
-    )?;
+    let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?, &opts.scope)?;
 
     // The universe is kept files only: a file the filter excludes exists
     // in no reference and no scoring pass.
@@ -361,11 +357,7 @@ pub fn abs(git: &Git, opts: &AbsOptions) -> Result<AbsReport> {
         .filter_map(|(p, b)| Some((p, b?)))
         .collect();
     let attr_paths: Vec<String> = contents.iter().map(|(p, _)| p.clone()).collect();
-    let filter = Filter::new(
-        git.root(),
-        git.linguist_attrs(&attr_paths)?,
-        opts.scope.ignore_tests,
-    )?;
+    let filter = Filter::new(git.root(), git.linguist_attrs(&attr_paths)?, &opts.scope)?;
     let kept: Vec<(&String, &[u8])> = contents
         .iter()
         .filter(|(p, c)| filter.exclusion(p, c).is_none())

@@ -43,6 +43,8 @@ fn setup() -> (tempfile::TempDir, Git) {
     // A substantial new test, for --ignore-tests.
     fs::create_dir(root.join("tests")).unwrap();
     fs::write(root.join("tests/novel_test.rs"), gen_code(77, 120)).unwrap();
+    // A prose document: skipped by default, scored with --prose.
+    fs::write(root.join("README.md"), gen_code(31, 40)).unwrap();
     // Pure move: same bytes, new path.
     git(root, &["mv", "src/mover.rs", "src/moved.rs"]);
     // Deletion of unique content.
@@ -61,18 +63,25 @@ fn setup() -> (tempfile::TempDir, Git) {
     (dir, git)
 }
 
-fn diff_at(git: &Git, side: Side) -> DiffReport {
+fn diff_scoped(git: &Git, scope: Scope) -> DiffReport {
     pipeline::diff(
         git,
         &DiffOptions {
-            scope: Scope {
-                side,
-                ..Default::default()
-            },
+            scope,
             ..Default::default()
         },
     )
     .unwrap()
+}
+
+fn diff_at(git: &Git, side: Side) -> DiffReport {
+    diff_scoped(
+        git,
+        Scope {
+            side,
+            ..Default::default()
+        },
+    )
 }
 
 fn abs_at(git: &Git, side: Side) -> AbsReport {
@@ -165,17 +174,13 @@ fn line_churn_counts_what_git_counts() {
     );
 
     // Excluding the test file drops exactly its lines, no others.
-    let without = pipeline::diff(
+    let without = diff_scoped(
         &git,
-        &DiffOptions {
-            scope: Scope {
-                ignore_tests: true,
-                ..Default::default()
-            },
+        Scope {
+            ignore_tests: true,
             ..Default::default()
         },
-    )
-    .unwrap();
+    );
     assert_eq!(
         (without.totals.added_lines, without.totals.deleted_lines),
         (120, 120)
@@ -188,17 +193,13 @@ fn line_churn_counts_what_git_counts() {
 fn ignoring_tests_drops_their_cost_and_leaves_the_rest() {
     let (_dir, git) = setup();
     let scored = |ignore_tests| {
-        pipeline::diff(
+        diff_scoped(
             &git,
-            &DiffOptions {
-                scope: Scope {
-                    ignore_tests,
-                    ..Default::default()
-                },
+            Scope {
+                ignore_tests,
                 ..Default::default()
             },
         )
-        .unwrap()
     };
     let review = |r: &cx_cli::pipeline::DiffReport, path| {
         r.files
@@ -229,42 +230,88 @@ fn ignoring_tests_drops_their_cost_and_leaves_the_rest() {
     );
 }
 
-/// The environment default through the real binary: a pinned value is
-/// only useful if it reaches scoring and a single run can still veto it.
+/// Prose is out of the universe by default and fully scored on request.
 #[test]
-fn ignore_tests_can_be_pinned_through_the_environment() {
-    let (dir, _git) = setup();
-    for (pinned, flag, expected) in [
-        (None, None, false),
-        (Some("1"), None, true),
-        (Some("true"), None, true),
-        // A set variable must not mean "true" whatever its value.
-        (Some("0"), None, false),
-        (Some("1"), Some("--ignore-tests=false"), false),
-        (None, Some("--ignore-tests"), true),
-    ] {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
-        cmd.current_dir(dir.path())
-            .args(["diff", "--json"])
-            .args(flag);
-        match pinned {
-            Some(value) => cmd.env("CX_IGNORE_TESTS", value),
-            // An inherited setting must not decide this test's outcome.
-            None => cmd.env_remove("CX_IGNORE_TESTS"),
-        };
-        let out = cmd.output().unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        let ignored = report["skipped"]
-            .as_array()
-            .unwrap()
+fn prose_is_skipped_by_default_and_scored_on_request() {
+    let (_dir, git) = setup();
+    let scored = |prose| {
+        diff_scoped(
+            &git,
+            Scope {
+                prose,
+                ..Default::default()
+            },
+        )
+    };
+    let (without, with) = (scored(false), scored(true));
+
+    assert!(
+        without
+            .skipped
             .iter()
-            .any(|s| s["path"] == "tests/novel_test.rs" && s["reason"] == "test");
-        assert_eq!(ignored, expected, "CX_IGNORE_TESTS={pinned:?}, {flag:?}");
+            .any(|s| s.path == "README.md" && s.reason == "prose"),
+        "README.md must be skipped as prose: {:?}",
+        without.skipped.iter().map(|s| &s.path).collect::<Vec<_>>()
+    );
+    assert!(without.files.iter().all(|f| f.path != "README.md"));
+    assert!(
+        with.files
+            .iter()
+            .any(|f| f.path == "README.md" && f.review_bytes > 300.0),
+        "with --prose the document is scored like anything else"
+    );
+    assert!(with.skipped.iter().all(|s| s.path != "README.md"));
+}
+
+/// Environment defaults through the real binary: a pinned value is only
+/// useful if it reaches scoring and a single run can still veto it. Each
+/// knob is observed through the skip list — `CX_IGNORE_TESTS` puts a test
+/// there, `CX_PROSE` takes a document out.
+#[test]
+fn defaults_can_be_pinned_through_the_environment() {
+    let (dir, _git) = setup();
+    for (var, flag, path, reason, skipped_when_on) in [
+        (
+            "CX_IGNORE_TESTS",
+            "--ignore-tests",
+            "tests/novel_test.rs",
+            "test",
+            true,
+        ),
+        ("CX_PROSE", "--prose", "README.md", "prose", false),
+    ] {
+        for (pinned, arg, on) in [
+            (None, None, false),
+            (Some("1"), None, true),
+            (Some("true"), None, true),
+            // A set variable must not mean "true" whatever its value.
+            (Some("0"), None, false),
+            (Some("1"), Some(format!("{flag}=false")), false),
+            (None, Some(flag.to_owned()), true),
+        ] {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+            cmd.current_dir(dir.path())
+                .args(["diff", "--json"])
+                .args(arg.as_deref())
+                .env_remove("CX_IGNORE_TESTS")
+                .env_remove("CX_PROSE");
+            if let Some(value) = pinned {
+                cmd.env(var, value);
+            }
+            let out = cmd.output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            let skipped = report["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["path"] == path && s["reason"] == reason);
+            assert_eq!(skipped, on == skipped_when_on, "{var}={pinned:?}, {arg:?}");
+        }
     }
 }
 
