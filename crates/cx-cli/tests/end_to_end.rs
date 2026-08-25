@@ -886,3 +886,64 @@ fn an_excluding_glob_drops_just_its_matches() {
         .collect();
     assert_eq!(paths(&without), expected);
 }
+
+/// The overview scores both views in one batch. Whatever it reports must
+/// be exactly what running each view on its own reports — the merge is a
+/// scheduling change, not a scoring one.
+#[test]
+fn the_overview_reports_what_its_two_views_report_alone() {
+    let (_dir, git) = setup();
+    let abs_opts = AbsOptions {
+        side: Side::Worktree,
+        ..Default::default()
+    };
+    let diff_opts = DiffOptions {
+        side: Side::Worktree,
+        ..Default::default()
+    };
+    let alone_tree = pipeline::abs(&git, &abs_opts, Progress::default()).unwrap();
+    let alone_diff = pipeline::diff(&git, &diff_opts, Progress::default()).unwrap();
+    let (tree, diff) =
+        pipeline::overview(&git, &abs_opts, &diff_opts, Progress::default()).unwrap();
+
+    assert_eq!(
+        serde_json::to_value(&tree).unwrap(),
+        serde_json::to_value(&alone_tree).unwrap(),
+        "C(tree) must not depend on what else the invocation scores"
+    );
+    assert_eq!(
+        serde_json::to_value(&diff).unwrap(),
+        serde_json::to_value(&alone_diff).unwrap(),
+        "the diff must not depend on what else the invocation scores"
+    );
+    assert!(
+        tree.compressed_bytes > 0 && !diff.files.is_empty(),
+        "the fixture must give both views something to score"
+    );
+}
+
+/// A run whose only change is an empty file gives every pass nothing to
+/// attribute. The file is still reported, scored zero.
+#[test]
+fn an_empty_file_is_reported_and_costs_nothing() {
+    let (dir, git) = setup();
+    fs::write(dir.path().join("src/empty.rs"), "").unwrap();
+    let report = pipeline::diff(
+        &git,
+        &DiffOptions {
+            side: Side::Worktree,
+            globs: vec!["src/empty.rs".to_owned()],
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+    assert_eq!(report.files.len(), 1, "the scope holds one file");
+    let empty = report
+        .files
+        .iter()
+        .find(|f| f.path == "src/empty.rs")
+        .expect("the empty file is scored, not skipped");
+    assert_eq!(empty.status, Status::Added);
+    assert_eq!((empty.review_bytes, empty.delta_bytes), (0, 0));
+}

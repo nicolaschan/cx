@@ -90,8 +90,19 @@ pub struct Attribution<'a> {
 }
 
 impl Attribution<'_> {
+    /// Whether this pass has anything to attribute. Every empty item
+    /// scores 0, and the reference is only ever context, so a pass with
+    /// nothing to attribute has no bytes to read — that is the metric,
+    /// not a shortcut around it.
+    fn attributes_nothing(&self) -> bool {
+        self.items.iter().all(|item| item.is_empty())
+    }
+
     /// Bytes to compress: the unit `progress` advances in.
     pub fn bytes(&self) -> u64 {
+        if self.attributes_nothing() {
+            return 0;
+        }
         self.reference
             .iter()
             .chain(self.items)
@@ -102,6 +113,9 @@ impl Attribution<'_> {
     /// Each item's score; `progress` receives each part's length as it
     /// finishes, reference parts included.
     pub fn run(&self, progress: impl Fn(u64)) -> Vec<u64> {
+        if self.attributes_nothing() {
+            return vec![0; self.items.len()];
+        }
         let mut cctx = CCtx::create();
         for p in [
             CParameter::CompressionLevel(self.scorer.level),
@@ -149,6 +163,22 @@ mod tests {
     fn empty_input_scores_zero() {
         let scorer = Scorer::default();
         assert_eq!(scorer.score(&[b"reference"], &[]), 0);
+    }
+
+    #[test]
+    fn a_pass_with_nothing_to_attribute_reads_no_bytes() {
+        let scorer = Scorer::default();
+        let reference: &[&[u8]] = &[b"context the compressor would otherwise have to read"];
+        let pass = scorer.attribution(reference, &[b"", b""]);
+        let read = std::sync::atomic::AtomicU64::new(0);
+        assert_eq!(pass.bytes(), 0);
+        assert_eq!(
+            pass.run(|n| {
+                read.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            }),
+            vec![0, 0]
+        );
+        assert_eq!(read.into_inner(), 0);
     }
 
     #[test]

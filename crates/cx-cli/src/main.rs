@@ -188,8 +188,12 @@ fn main() -> Result<()> {
     match cli.cmd {
         None => {
             let common = cli.common;
-            let abs = pipeline::abs(&git, &common.abs_options(), progress)?;
-            let diff = pipeline::diff(&git, &cli.diff.options(&common), progress)?;
+            let (abs, diff) = pipeline::overview(
+                &git,
+                &common.abs_options(),
+                &cli.diff.options(&common),
+                progress,
+            )?;
             emit(
                 common.json,
                 &serde_json::json!({ "abs": abs, "diff": diff }),
