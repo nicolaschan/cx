@@ -48,9 +48,9 @@ struct CommonArgs {
     )]
     include_tests: bool,
     /// Score comments too. By default every file is reduced to code —
-    /// comments stripped, blank lines dropped — before scoring. Takes an
-    /// optional value so a pinned default can be vetoed for one run:
-    /// `--comments=false`.
+    /// comments stripped, string contents emptied, blank lines dropped —
+    /// before scoring. Takes an optional value so a pinned default can
+    /// be vetoed for one run: `--comments=false`.
     #[arg(
         long,
         env = "CX_COMMENTS",
@@ -60,6 +60,19 @@ struct CommonArgs {
         value_parser = BoolishValueParser::new(),
     )]
     comments: bool,
+    /// Score string literal contents too. By default a string counts —
+    /// its delimiters stay — but its contents are emptied before
+    /// scoring, like comments. Takes an optional value so a pinned
+    /// default can be vetoed for one run: `--strings=false`.
+    #[arg(
+        long,
+        env = "CX_STRINGS",
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = BoolishValueParser::new(),
+    )]
+    strings: bool,
     /// Score prose files too — Markdown, reStructuredText, plain text,
     /// AsciiDoc, Org, and extensionless documents such as LICENSE. By
     /// default they are skipped. Takes an optional value so a pinned
@@ -73,6 +86,19 @@ struct CommonArgs {
         value_parser = BoolishValueParser::new(),
     )]
     prose: bool,
+    /// Score data files too — JSON, XML, SVG, and the tabular or
+    /// line-delimited formats (CSV, TSV, JSON Lines, GeoJSON). By
+    /// default they are skipped, like prose. Takes an optional value so
+    /// a pinned default can be vetoed for one run: `--data=false`.
+    #[arg(
+        long,
+        env = "CX_DATA",
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        value_parser = BoolishValueParser::new(),
+    )]
+    data: bool,
     /// Restrict the run to paths matching GLOB. Repeatable; gitignore
     /// syntax, `!` excludes, and among globs the last match wins. Paths
     /// outside the scope are not scored and not part of the reference —
@@ -107,7 +133,9 @@ impl DiffArgs {
             side: common.side(),
             include_tests: common.include_tests,
             comments: common.comments,
+            strings: common.strings,
             prose: common.prose,
+            data: common.data,
             globs: common.globs.clone(),
         }
     }
@@ -128,7 +156,9 @@ impl CommonArgs {
         AbsOptions {
             include_tests: self.include_tests,
             comments: self.comments,
+            strings: self.strings,
             prose: self.prose,
+            data: self.data,
             side: self.side(),
             globs: self.globs.clone(),
         }

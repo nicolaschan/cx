@@ -26,9 +26,15 @@ pub struct DiffOptions {
     /// Score comments too. Otherwise every blob is reduced to code before
     /// it enters any reference or scoring pass.
     pub comments: bool,
+    /// Score string literal contents too. Otherwise each string is
+    /// reduced to its delimiters, like comments are removed.
+    pub strings: bool,
     /// Score prose files (Markdown, reStructuredText, …) too. Otherwise
     /// they are skipped, like tests.
     pub prose: bool,
+    /// Score data files (JSON, CSV, …) too. Otherwise they are skipped,
+    /// like prose.
+    pub data: bool,
     /// Restrict the run to the paths these globs select — see [`Scope`].
     /// Empty is the whole repository.
     pub globs: Vec<String>,
@@ -100,11 +106,10 @@ fn lines(content: &[u8]) -> u64 {
 /// needs them); everything after sees code only.
 type Prepared = Result<Vec<u8>, &'static str>;
 
-fn prepare(filter: &Filter, comments: bool, path: &str, raw: Vec<u8>) -> Prepared {
+fn prepare(filter: &Filter, keep: strip::Keep, path: &str, raw: Vec<u8>) -> Prepared {
     match filter.exclusion(path, &raw) {
         Some(reason) => Err(reason),
-        None if comments => Ok(raw),
-        None => Ok(strip::code_only(path, raw)),
+        None => Ok(strip::code_only(path, raw, keep)),
     }
 }
 
@@ -113,7 +118,7 @@ fn prepare(filter: &Filter, comments: bool, path: &str, raw: Vec<u8>) -> Prepare
 /// simply absent.
 fn load<'a>(
     filter: &Filter,
-    comments: bool,
+    keep: strip::Keep,
     paths: &[&'a str],
     blobs: Vec<Option<Vec<u8>>>,
 ) -> Vec<(&'a str, Prepared)> {
@@ -121,7 +126,7 @@ fn load<'a>(
         .iter()
         .copied()
         .zip(blobs)
-        .filter_map(|(path, blob)| Some((path, prepare(filter, comments, path, blob?))))
+        .filter_map(|(path, blob)| Some((path, prepare(filter, keep, path, blob?))))
         .collect()
 }
 
@@ -146,8 +151,13 @@ pub struct AbsOptions {
     pub include_tests: bool,
     /// Score comments too; otherwise every blob is reduced to code first.
     pub comments: bool,
+    /// Score string literal contents too; otherwise each string is
+    /// reduced to its delimiters.
+    pub strings: bool,
     /// Score prose files too; otherwise they are skipped.
     pub prose: bool,
+    /// Score data files too; otherwise they are skipped.
+    pub data: bool,
     pub side: Side,
     /// Restrict the run to the paths these globs select — see [`Scope`].
     /// Empty is the whole repository.
@@ -219,13 +229,18 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         git.linguist_attrs(&attr_paths)?,
         opts.include_tests,
         opts.prose,
+        opts.data,
     )?;
+    let keep = strip::Keep {
+        comments: opts.comments,
+        strings: opts.strings,
+    };
 
     // The whole old tree plus the new side of every change, each blob
     // filtered and reduced to code once.
     let old_tree: HashMap<&str, Prepared> = load(
         &filter,
-        opts.comments,
+        keep,
         &tree_refs,
         git.tree_contents(&merge_base, &tree_refs)?,
     )
@@ -233,7 +248,7 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
     .collect();
     let new_contents: HashMap<&str, Prepared> = load(
         &filter,
-        opts.comments,
+        keep,
         &new_side_paths,
         git.contents(opts.side, &new_side_paths)?,
     )
@@ -373,10 +388,15 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
         git.linguist_attrs(&attr_paths)?,
         opts.include_tests,
         opts.prose,
+        opts.data,
     )?;
+    let keep = strip::Keep {
+        comments: opts.comments,
+        strings: opts.strings,
+    };
     // Each kept blob, filtered and reduced to code, in the order
     // `git.list` produced — already sorted, which the chain rule wants.
-    let kept: Vec<(&str, Vec<u8>)> = load(&filter, opts.comments, &path_refs, blobs)
+    let kept: Vec<(&str, Vec<u8>)> = load(&filter, keep, &path_refs, blobs)
         .into_iter()
         .filter_map(|(p, prepared)| Some((p, prepared.ok()?)))
         .collect();
