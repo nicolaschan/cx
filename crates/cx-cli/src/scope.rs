@@ -72,8 +72,8 @@ impl Scope {
     /// directory the run is rooted at, which is how every path it
     /// reports is written. Paths it never looked at keep the name they
     /// have in the repository.
-    pub fn name<'a>(&self, path: &'a str) -> &'a str {
-        path.strip_prefix(&self.base).unwrap_or(path)
+    pub fn name(&self, path: &str) -> String {
+        path.strip_prefix(&self.base).unwrap_or(path).to_owned()
     }
 }
 

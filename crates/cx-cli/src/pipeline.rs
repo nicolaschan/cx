@@ -279,7 +279,7 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
             .find_map(|b| b.as_ref().err())
         {
             skipped.push(Skipped {
-                path: scope.name(&change.path).to_owned(),
+                path: scope.name(&change.path),
                 reason: (*reason).to_owned(),
             });
             continue;
@@ -332,12 +332,12 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         let status = match &item.status {
             Status::Renamed { from } if !scope.allows(from) => Status::Added,
             Status::Renamed { from } => Status::Renamed {
-                from: scope.name(from).to_owned(),
+                from: scope.name(from),
             },
             status => status.clone(),
         };
         files.push(DiffFile {
-            path: scope.name(&item.path).to_owned(),
+            path: scope.name(&item.path),
             review_bytes: review[i],
             delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
             new_lines,
@@ -406,7 +406,7 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
         .iter()
         .zip(&scores)
         .map(|((path, content), &bytes)| AbsFile {
-            path: scope.name(path).to_owned(),
+            path: scope.name(path),
             bytes,
             lines: lines(content),
         })
