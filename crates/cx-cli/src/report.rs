@@ -186,8 +186,8 @@ fn view<'a>(
     if !opts.files {
         return footer;
     }
-    let root = breakdown::breakdown(entries, opts.top);
-    if root.children.is_empty() {
+    let tree = breakdown::breakdown(entries, opts.top);
+    if tree.children.is_empty() {
         return footer;
     }
     let columns: &[&str] = match diff_columns {
@@ -203,7 +203,7 @@ fn view<'a>(
     table.load_preset(presets::NOTHING);
     table.set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(columns.iter().map(|c| Cell::new(c).fg(Color::DarkGrey)));
-    push_children(&mut table, &root, "", total, diff_columns.is_some());
+    push_children(&mut table, &tree, "", total, diff_columns.is_some());
     format!("{table}\n\n{footer}")
 }
 

@@ -17,23 +17,23 @@ pub struct Scope {
     /// at the root, otherwise a directory with its trailing slash, so
     /// that stripping it from a path both tests and performs the move
     /// into the run's own frame.
-    base: String,
+    prefix: String,
     globs: Override,
 }
 
 impl Scope {
-    /// A run rooted at `base` — the repo-relative directory cx was run
+    /// A run rooted at `prefix` — the repo-relative directory cx was run
     /// from — selecting within it by gitignore glob syntax, with `!`
     /// excluding and the last matching glob winning: `ignore`'s override
-    /// matcher, which is ripgrep's `-g`. Globs read from `base`, like
+    /// matcher, which is ripgrep's `-g`. Globs read from `prefix`, like
     /// every other path a run names. No globs admits the whole subtree.
-    pub fn new(root: &Path, base: &str, globs: &[String]) -> Result<Self> {
-        let mut builder = OverrideBuilder::new(root.join(base));
+    pub fn new(repo: &Path, prefix: &str, globs: &[String]) -> Result<Self> {
+        let mut builder = OverrideBuilder::new(repo.join(prefix));
         for glob in globs {
             builder.add(glob)?;
         }
         Ok(Scope {
-            base: base.to_owned(),
+            prefix: prefix.to_owned(),
             globs: builder.build()?,
         })
     }
@@ -53,7 +53,7 @@ impl Scope {
     /// that is what keeps `Override` from reporting its
     /// no-include-matched verdict as an exclude of its own.
     pub fn allows(&self, path: &str) -> bool {
-        let Some(path) = path.strip_prefix(&self.base) else {
+        let Some(path) = path.strip_prefix(&self.prefix) else {
             return false;
         };
         let dirs = path.match_indices('/').map(|(end, _)| &path[..end]);
@@ -73,7 +73,7 @@ impl Scope {
     /// reports is written. Paths it never looked at keep the name they
     /// have in the repository.
     pub fn name(&self, path: &str) -> String {
-        path.strip_prefix(&self.base).unwrap_or(path).to_owned()
+        path.strip_prefix(&self.prefix).unwrap_or(path).to_owned()
     }
 }
 
@@ -81,9 +81,9 @@ impl Scope {
 mod tests {
     use super::*;
 
-    fn rooted(base: &str, globs: &[&str]) -> Scope {
+    fn rooted(prefix: &str, globs: &[&str]) -> Scope {
         let globs: Vec<String> = globs.iter().map(|g| (*g).to_owned()).collect();
-        Scope::new(Path::new("/repo"), base, &globs).unwrap()
+        Scope::new(Path::new("/repo"), prefix, &globs).unwrap()
     }
 
     fn scope(globs: &[&str]) -> Scope {
@@ -148,8 +148,8 @@ mod tests {
     /// nothing else, and reads its globs from where it stands.
     #[test]
     fn a_run_below_the_root_sees_only_its_own_subtree() {
-        for (base, globs, path, allowed) in [
-            // The base alone selects, as `-g 'sub/**'` would.
+        for (prefix, globs, path, allowed) in [
+            // The prefix alone selects, as `-g 'sub/**'` would.
             ("sub/", &[][..], "sub/main.rs", true),
             ("sub/", &[][..], "other/lib.rs", false),
             ("sub/", &[][..], "README.md", false),
@@ -169,9 +169,9 @@ mod tests {
             ("sub/", &["sub/**"][..], "sub/src/main.rs", false),
         ] {
             assert_eq!(
-                rooted(base, globs).allows(path),
+                rooted(prefix, globs).allows(path),
                 allowed,
-                "{base:?} {globs:?} on {path}"
+                "{prefix:?} {globs:?} on {path}"
             );
         }
     }

@@ -778,26 +778,42 @@ fn repo_with(files: &[(&str, Vec<u8>)]) -> (tempfile::TempDir, Git) {
     (dir, repo)
 }
 
-/// What `--glob` promises: the selection is scored *as if it were the
-/// whole repository*. Not the same files filtered out of a larger answer
-/// — the same numbers, which only holds because the out-of-scope files
-/// are absent from the reference too. Scoring `alpha/` inside a repo that
-/// also holds `beta/` must equal scoring a repo that only ever had
-/// `alpha/`.
-#[test]
-fn a_scoped_run_equals_a_repo_holding_only_that_scope() {
-    let alpha = [
+/// A repo whose `alpha/` is worth scoping to, and whose `beta/` must
+/// leave no trace on the answer when it is.
+fn alpha_and_beta() -> [(&'static str, Vec<u8>); 4] {
+    [
         ("alpha/a.rs", gen_code(1, 120)),
         ("alpha/b.rs", gen_code(2, 120)),
-    ];
-    let (_whole_dir, whole) = repo_with(&[
-        alpha[0].clone(),
-        alpha[1].clone(),
         ("beta/c.rs", gen_code(3, 120)),
         ("beta/d.rs", gen_code(4, 120)),
-    ]);
-    let (_alone_dir, alone) = repo_with(&alpha);
+    ]
+}
 
+/// The promise a scope makes, however it was drawn: the selection is
+/// scored *as if it were the whole repository*. Not the same files
+/// filtered out of a larger answer — the same names and the same
+/// numbers a repo holding only `alone` reports, which only holds
+/// because the out-of-scope files are absent from the reference too.
+fn assert_scores_like_a_repo_of_its_own(scoped: &pipeline::AbsReport, alone: &[(&str, Vec<u8>)]) {
+    let (_dir, alone_repo) = repo_with(alone);
+    let on_its_own =
+        pipeline::abs(&alone_repo, &AbsOptions::default(), Progress::default()).unwrap();
+    let scores = |r: &pipeline::AbsReport| -> Vec<(String, u64)> {
+        r.files.iter().map(|f| (f.path.clone(), f.bytes)).collect()
+    };
+    assert_eq!(scores(scoped), scores(&on_its_own));
+    assert_eq!(scoped.compressed_bytes, on_its_own.compressed_bytes);
+    assert_eq!(
+        scoped.file_count,
+        alone.len(),
+        "the scope's files, and no more"
+    );
+}
+
+/// Scoping `alpha/` by glob inside a repo that also holds `beta/`.
+#[test]
+fn a_scoped_run_equals_a_repo_holding_only_that_scope() {
+    let (_dir, whole) = repo_with(&alpha_and_beta());
     let scoped = pipeline::abs(
         &whole,
         &AbsOptions {
@@ -807,14 +823,16 @@ fn a_scoped_run_equals_a_repo_holding_only_that_scope() {
         Progress::default(),
     )
     .unwrap();
-    let unscoped = pipeline::abs(&alone, &AbsOptions::default(), Progress::default()).unwrap();
 
-    let scores = |r: &pipeline::AbsReport| -> Vec<(String, u64)> {
-        r.files.iter().map(|f| (f.path.clone(), f.bytes)).collect()
-    };
-    assert_eq!(scores(&scoped), scores(&unscoped));
-    assert_eq!(scoped.compressed_bytes, unscoped.compressed_bytes);
-    assert_eq!(scoped.file_count, 2);
+    // A glob names paths from the repository root, so its twin holds
+    // them at that same depth.
+    assert_scores_like_a_repo_of_its_own(
+        &scoped,
+        &[
+            ("alpha/a.rs", gen_code(1, 120)),
+            ("alpha/b.rs", gen_code(2, 120)),
+        ],
+    );
 }
 
 /// Out of scope is *absent*, not *skipped*. The skipped list names files
@@ -887,30 +905,20 @@ fn an_excluding_glob_drops_just_its_matches() {
     assert_eq!(paths(&without), expected);
 }
 
-/// Where cx is run is what cx measures. A run inside `alpha/` sizes that
-/// subtree as its own codebase and names its files as they read from
-/// there — the same report as a repository that only ever held them.
+/// The same promise, drawn by standing in `alpha/` instead: where cx is
+/// run is what cx measures.
 #[test]
 fn a_run_inside_a_subdirectory_equals_a_repo_holding_only_that_subtree() {
-    let (whole_dir, _whole) = repo_with(&[
-        ("alpha/a.rs", gen_code(1, 120)),
-        ("alpha/b.rs", gen_code(2, 120)),
-        ("beta/c.rs", gen_code(3, 120)),
-        ("beta/d.rs", gen_code(4, 120)),
-    ]);
-    let inside = Git::discover_at(&whole_dir.path().join("alpha")).unwrap();
-    let (_alone_dir, alone) = repo_with(&[("a.rs", gen_code(1, 120)), ("b.rs", gen_code(2, 120))]);
+    let (dir, _whole) = repo_with(&alpha_and_beta());
+    let inside = Git::discover_at(&dir.path().join("alpha")).unwrap();
+    let scoped = pipeline::abs(&inside, &AbsOptions::default(), Progress::default()).unwrap();
 
-    let measure =
-        |repo: &Git| pipeline::abs(repo, &AbsOptions::default(), Progress::default()).unwrap();
-    let (from_inside, whole_repo) = (measure(&inside), measure(&alone));
-
-    let scores = |r: &pipeline::AbsReport| -> Vec<(String, u64)> {
-        r.files.iter().map(|f| (f.path.clone(), f.bytes)).collect()
-    };
-    assert_eq!(scores(&from_inside), scores(&whole_repo));
-    assert_eq!(from_inside.compressed_bytes, whole_repo.compressed_bytes);
-    assert_eq!(from_inside.file_count, 2, "alpha's two files, and no more");
+    // Standing in `alpha/` names its files from there, so its twin holds
+    // them at its own root.
+    assert_scores_like_a_repo_of_its_own(
+        &scoped,
+        &[("a.rs", gen_code(1, 120)), ("b.rs", gen_code(2, 120))],
+    );
 }
 
 /// The same, through the binary: the process's directory is the run's
