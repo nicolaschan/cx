@@ -9,6 +9,7 @@ use std::process::Command;
 use cx_cli::git::{Git, Side, Status};
 use cx_cli::pipeline::{self, Options};
 use cx_cli::progress::Progress;
+use cx_cli::report::{Options, render_diff, render_overview};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -1149,4 +1150,56 @@ fn an_excluding_glob_drops_just_its_matches() {
         .filter(|p| p != "src/novel.rs")
         .collect();
     assert_eq!(paths(&without), expected);
+}
+
+/// The diff view's LINES column reports net churn, signed: a deleted
+/// file reads −, an added one +. The overview's column, measuring the
+/// tree rather than the change, stays an absolute count.
+#[test]
+fn diff_lines_column_reports_signed_net_churn() {
+    let (_dir, git) = setup();
+    let opts = Options {
+        top: 30,
+        files: true,
+        verbose: false,
+        color: false,
+    };
+    let diff = pipeline::diff(
+        &git,
+        &DiffOptions {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+    let rendered = render_diff(&diff, opts);
+    let row = |name| {
+        rendered
+            .lines()
+            .find(|l| l.contains(name))
+            .unwrap_or_else(|| panic!("no {name} row in:\n{rendered}"))
+            .to_owned()
+    };
+    assert!(row("novel.rs").contains("+120"), "{}", row("novel.rs"));
+    assert!(row("gone.rs").contains("−120"), "{}", row("gone.rs"));
+
+    let abs = pipeline::abs(
+        &git,
+        &AbsOptions {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+    let overview = render_overview(&abs, &diff, opts);
+    let novel = overview
+        .lines()
+        .find(|l| l.contains("novel.rs"))
+        .unwrap_or_else(|| panic!("no novel.rs row in:\n{overview}"));
+    assert!(
+        novel.contains("120") && !novel.contains("+120"),
+        "absolute, not a delta: {novel}"
+    );
 }

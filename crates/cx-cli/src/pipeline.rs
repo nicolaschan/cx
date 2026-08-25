@@ -83,6 +83,10 @@ pub struct DiffFile {
     pub review_bytes: u64,
     /// Metric 2: complexity added (+) or removed (−).
     pub delta_bytes: i64,
+    /// Diff churn: lines this file adds and removes against the merge base.
+    /// The signed net (added − deleted) is the diff view's LINES column.
+    pub added_lines: u64,
+    pub deleted_lines: u64,
     pub new_lines: u64,
     /// review_bytes / new_lines — density separates tables from
     /// algorithms. Only defined for added files, where all lines are
@@ -319,14 +323,18 @@ pub fn diff(
             .map(|stream| stream.join().expect("stream thread"))
     });
 
+    let churn = git.line_counts(&merge_base, opts.side)?;
     let mut files = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let new_lines = lines(new_items[i]);
+        let (added_lines, deleted_lines) = churn.get(&item.path).copied().unwrap_or_default();
         files.push(DiffFile {
             path: item.path.clone(),
             status: item.status.clone(),
             review_bytes: review[i],
             delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
+            added_lines,
+            deleted_lines,
             new_lines,
             bytes_per_line: (item.status == Status::Added && new_lines > 0)
                 .then(|| review[i] as f64 / new_lines as f64),
@@ -336,12 +344,6 @@ pub fn diff(
     flag_density_outliers(&mut files);
     files.sort_by_key(|f| Reverse(f.review_bytes));
 
-    let churn = git.line_counts(&merge_base, opts.side)?;
-    let (added_lines, deleted_lines) = items
-        .iter()
-        .filter_map(|item| churn.get(&item.path))
-        .fold((0, 0), |(a, d), (added, deleted)| (a + added, d + deleted));
-
     Ok(DiffReport {
         version: VersionInfo::for_scorer(&scorer),
         base,
@@ -349,8 +351,8 @@ pub fn diff(
         totals: Totals {
             review_bytes: files.iter().map(|f| f.review_bytes).sum(),
             delta_bytes: files.iter().map(|f| f.delta_bytes).sum(),
-            added_lines,
-            deleted_lines,
+            added_lines: files.iter().map(|f| f.added_lines).sum(),
+            deleted_lines: files.iter().map(|f| f.deleted_lines).sum(),
         },
         files,
         skipped,
