@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use cx_cli::git::{Git, Side, Status};
-use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::pipeline::{self, Options};
 use cx_cli::progress::Progress;
 
 fn git(dir: &Path, args: &[&str]) {
@@ -67,7 +67,8 @@ fn scores_a_realistic_branch() {
     let (_dir, git) = setup();
     let report = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -129,7 +130,7 @@ fn scores_a_realistic_branch() {
 #[test]
 fn line_churn_counts_what_git_counts() {
     let (_dir, git) = setup();
-    let report = pipeline::diff(&git, &DiffOptions::default(), Progress::default()).unwrap();
+    let report = pipeline::diff(&git, None, &Options::default(), Progress::default()).unwrap();
     assert_eq!(
         (report.totals.added_lines, report.totals.deleted_lines),
         (120, 120)
@@ -138,7 +139,8 @@ fn line_churn_counts_what_git_counts() {
     // Including the test file adds exactly its lines, no others.
     let with = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             include_tests: true,
             ..Default::default()
         },
@@ -159,7 +161,8 @@ fn excluding_tests_drops_their_cost_and_leaves_the_rest() {
     let scored = |include_tests| {
         pipeline::diff(
             &git,
-            &DiffOptions {
+            None,
+            &Options {
                 include_tests,
                 ..Default::default()
             },
@@ -251,7 +254,8 @@ fn staged_mode_scores_the_index() {
 
     let report = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Index,
             ..Default::default()
         },
@@ -270,7 +274,7 @@ fn tree_reports_absolute_complexity_with_contributions() {
     let (_dir, git) = setup();
     let report = pipeline::abs(
         &git,
-        &AbsOptions {
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -312,7 +316,8 @@ fn worktree_side_scores_the_whole_working_tree() {
 
     let report = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Worktree,
             ..Default::default()
         },
@@ -338,7 +343,8 @@ fn worktree_side_scores_the_whole_working_tree() {
     // The unstaged and untracked halves are exactly what --staged misses.
     let staged_only = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Index,
             ..Default::default()
         },
@@ -366,7 +372,7 @@ fn abs_measures_the_snapshot_it_is_asked_for() {
     let measure = |side| {
         let report = pipeline::abs(
             &repo,
-            &AbsOptions {
+            &Options {
                 side,
                 ..Default::default()
             },
@@ -446,7 +452,7 @@ fn an_unmerged_path_is_scored_once() {
     let repo = Git::discover_at(root).unwrap();
     let report = pipeline::abs(
         &repo,
-        &AbsOptions {
+        &Options {
             side: Side::Worktree,
             ..Default::default()
         },
@@ -467,7 +473,8 @@ fn untracked_lines_reach_the_churn_totals() {
     let root = dir.path();
     let committed = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -478,7 +485,8 @@ fn untracked_lines_reach_the_churn_totals() {
     fs::write(root.join("src/fresh.rs"), gen_code(77, 40)).unwrap();
     let worktree = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Worktree,
             ..Default::default()
         },
@@ -531,10 +539,11 @@ fn a_submodule_is_skipped_not_fatal() {
     git(root, &["commit", "-q", "-m", "add submodule"]);
 
     // Both scoring passes must succeed with the gitlink present...
-    let abs = pipeline::abs(&repo, &AbsOptions::default(), Progress::default()).unwrap();
+    let abs = pipeline::abs(&repo, &Options::default(), Progress::default()).unwrap();
     let diff = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -963,14 +972,14 @@ fn a_scoped_run_equals_a_repo_holding_only_that_scope() {
 
     let scoped = pipeline::abs(
         &whole,
-        &AbsOptions {
+        &Options {
             globs: vec!["alpha/**".to_owned()],
             ..Default::default()
         },
         Progress::default(),
     )
     .unwrap();
-    let unscoped = pipeline::abs(&alone, &AbsOptions::default(), Progress::default()).unwrap();
+    let unscoped = pipeline::abs(&alone, &Options::default(), Progress::default()).unwrap();
 
     let scores = |r: &pipeline::AbsReport| -> Vec<(String, u64)> {
         r.files.iter().map(|f| (f.path.clone(), f.bytes)).collect()
@@ -988,7 +997,8 @@ fn out_of_scope_files_are_neither_scored_nor_skipped() {
     let (_dir, git) = setup();
     let report = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             globs: vec!["src/**".to_owned()],
             ..Default::default()
@@ -1024,7 +1034,8 @@ fn an_excluding_glob_drops_just_its_matches() {
     let run = |globs: Vec<String>| {
         pipeline::diff(
             &git,
-            &DiffOptions {
+            None,
+            &Options {
                 side: Side::Head,
                 globs,
                 ..Default::default()

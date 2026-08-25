@@ -16,19 +16,17 @@ use crate::strip;
 
 const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/master"];
 
+/// What a scoring run selects; every view shares the same choices.
 #[derive(Default)]
-pub struct DiffOptions {
-    pub base: Option<String>,
+pub struct Options {
     pub side: Side,
     /// Score test files too. Otherwise they leave the universe entirely:
     /// in no reference and no scoring pass, and reported as skipped.
     pub include_tests: bool,
-    /// Score comments too. Otherwise every blob is reduced to code before
-    /// it enters any reference or scoring pass.
-    pub comments: bool,
-    /// Score string literal contents too. Otherwise each string is
-    /// reduced to its delimiters, like comments are removed.
-    pub strings: bool,
+    /// Stripped-by-default byte classes — comments, string literal
+    /// contents — to score anyway. Otherwise every blob is reduced to
+    /// code before it enters any reference or scoring pass.
+    pub keep: strip::Keep,
     /// Score prose files (Markdown, reStructuredText, …) too. Otherwise
     /// they are skipped, like tests.
     pub prose: bool,
@@ -38,6 +36,19 @@ pub struct DiffOptions {
     /// Restrict the run to the paths these globs select — see [`Scope`].
     /// Empty is the whole repository.
     pub globs: Vec<String>,
+}
+
+impl Options {
+    /// The file filter these selections configure.
+    fn filter(&self, git: &Git, attr_paths: &[String]) -> Result<Filter> {
+        Filter::new(
+            git.root(),
+            git.linguist_attrs(attr_paths)?,
+            self.include_tests,
+            self.prose,
+            self.data,
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -145,25 +156,6 @@ pub struct DiffReport {
     pub totals: Totals,
 }
 
-#[derive(Default)]
-pub struct AbsOptions {
-    /// Score test files too; otherwise they leave the universe entirely.
-    pub include_tests: bool,
-    /// Score comments too; otherwise every blob is reduced to code first.
-    pub comments: bool,
-    /// Score string literal contents too; otherwise each string is
-    /// reduced to its delimiters.
-    pub strings: bool,
-    /// Score prose files too; otherwise they are skipped.
-    pub prose: bool,
-    /// Score data files too; otherwise they are skipped.
-    pub data: bool,
-    pub side: Side,
-    /// Restrict the run to the paths these globs select — see [`Scope`].
-    /// Empty is the whole repository.
-    pub globs: Vec<String>,
-}
-
 /// One file's contribution to C(tree): its sequential chain-rule score in
 /// sorted-path order.
 #[derive(Serialize)]
@@ -202,8 +194,13 @@ fn serialize_status<S: serde::Serializer>(status: &Status, s: S) -> Result<S::Ok
     })
 }
 
-pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffReport> {
-    let base = resolve_base(git, opts.base.as_deref())?;
+pub fn diff(
+    git: &Git,
+    base: Option<&str>,
+    opts: &Options,
+    progress: Progress,
+) -> Result<DiffReport> {
+    let base = resolve_base(git, base)?;
     let merge_base = git.merge_base(&base, "HEAD")?;
     // Scoping happens on the raw listings, before a blob is fetched: an
     // out-of-scope path is not in the reference, not scored, and not
@@ -224,23 +221,13 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
         .cloned()
         .chain(new_side_paths.iter().map(|p| p.to_string()))
         .collect();
-    let filter = Filter::new(
-        git.root(),
-        git.linguist_attrs(&attr_paths)?,
-        opts.include_tests,
-        opts.prose,
-        opts.data,
-    )?;
-    let keep = strip::Keep {
-        comments: opts.comments,
-        strings: opts.strings,
-    };
+    let filter = opts.filter(git, &attr_paths)?;
 
     // The whole old tree plus the new side of every change, each blob
     // filtered and reduced to code once.
     let old_tree: HashMap<&str, Prepared> = load(
         &filter,
-        keep,
+        opts.keep,
         &tree_refs,
         git.tree_contents(&merge_base, &tree_refs)?,
     )
@@ -248,7 +235,7 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
     .collect();
     let new_contents: HashMap<&str, Prepared> = load(
         &filter,
-        keep,
+        opts.keep,
         &new_side_paths,
         git.contents(opts.side, &new_side_paths)?,
     )
@@ -370,7 +357,7 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
     })
 }
 
-pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport> {
+pub fn abs(git: &Git, opts: &Options, progress: Progress) -> Result<AbsReport> {
     // Scoped before the blobs are fetched: out of scope is out of the
     // repository, as far as this run is concerned.
     let scope = Scope::new(git.root(), &opts.globs)?;
@@ -383,20 +370,10 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
         .zip(&blobs)
         .filter_map(|(p, b)| b.as_ref().map(|_| p.to_string()))
         .collect();
-    let filter = Filter::new(
-        git.root(),
-        git.linguist_attrs(&attr_paths)?,
-        opts.include_tests,
-        opts.prose,
-        opts.data,
-    )?;
-    let keep = strip::Keep {
-        comments: opts.comments,
-        strings: opts.strings,
-    };
+    let filter = opts.filter(git, &attr_paths)?;
     // Each kept blob, filtered and reduced to code, in the order
     // `git.list` produced — already sorted, which the chain rule wants.
-    let kept: Vec<(&str, Vec<u8>)> = load(&filter, keep, &path_refs, blobs)
+    let kept: Vec<(&str, Vec<u8>)> = load(&filter, opts.keep, &path_refs, blobs)
         .into_iter()
         .filter_map(|(p, prepared)| Some((p, prepared.ok()?)))
         .collect();

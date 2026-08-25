@@ -5,9 +5,10 @@ use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use cx_cli::git::{Git, Side};
-use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::pipeline::{self, Options};
 use cx_cli::progress::Progress;
 use cx_cli::report;
+use cx_cli::strip::Keep;
 
 /// Score git trees and diffs by marginal description length: how much
 /// new information content adds, conditioned on what the codebase
@@ -126,21 +127,6 @@ struct DiffArgs {
     base: Option<String>,
 }
 
-impl DiffArgs {
-    fn options(self, common: &CommonArgs) -> DiffOptions {
-        DiffOptions {
-            base: self.base,
-            side: common.side(),
-            include_tests: common.include_tests,
-            comments: common.comments,
-            strings: common.strings,
-            prose: common.prose,
-            data: common.data,
-            globs: common.globs.clone(),
-        }
-    }
-}
-
 impl CommonArgs {
     fn side(&self) -> Side {
         if self.committed {
@@ -152,14 +138,16 @@ impl CommonArgs {
         }
     }
 
-    fn abs_options(&self) -> AbsOptions {
-        AbsOptions {
+    fn options(&self) -> Options {
+        Options {
+            side: self.side(),
             include_tests: self.include_tests,
-            comments: self.comments,
-            strings: self.strings,
+            keep: Keep {
+                comments: self.comments,
+                strings: self.strings,
+            },
             prose: self.prose,
             data: self.data,
-            side: self.side(),
             globs: self.globs.clone(),
         }
     }
@@ -218,8 +206,9 @@ fn main() -> Result<()> {
     match cli.cmd {
         None => {
             let common = cli.common;
-            let abs = pipeline::abs(&git, &common.abs_options(), progress)?;
-            let diff = pipeline::diff(&git, &cli.diff.options(&common), progress)?;
+            let opts = common.options();
+            let abs = pipeline::abs(&git, &opts, progress)?;
+            let diff = pipeline::diff(&git, cli.diff.base.as_deref(), &opts, progress)?;
             emit(
                 common.json,
                 &serde_json::json!({ "abs": abs, "diff": diff }),
@@ -234,7 +223,7 @@ fn main() -> Result<()> {
             if matches!(granularity, Granularity::Hunk) {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
-            let report = pipeline::diff(&git, &diff.options(&common), progress)?;
+            let report = pipeline::diff(&git, diff.base.as_deref(), &common.options(), progress)?;
             emit(
                 common.json,
                 &report,
@@ -242,7 +231,7 @@ fn main() -> Result<()> {
             )?;
         }
         Some(Cmd::Abs { common }) => {
-            let report = pipeline::abs(&git, &common.abs_options(), progress)?;
+            let report = pipeline::abs(&git, &common.options(), progress)?;
             emit(
                 common.json,
                 &report,
