@@ -959,6 +959,17 @@ fn the_binary_is_rooted_where_it_runs() {
         paths(&inside, "skipped").is_empty(),
         "the root's lockfile and binary are outside this run entirely"
     );
+    // git keys its line counts by repository path, so the churn totals
+    // are the check that the run's own names stayed on the report side.
+    assert_eq!(
+        (
+            inside["totals"]["added_lines"].as_u64().unwrap(),
+            inside["totals"]["deleted_lines"].as_u64().unwrap()
+        ),
+        (120, 120),
+        "novel.rs added and gone.rs deleted, counted as git counts them"
+    );
+    assert_eq!(inside["root"], "src/", "the run says where it was rooted");
 
     // At the root the same repository reports its whole self.
     let root = run(dir.path());
@@ -970,6 +981,7 @@ fn the_binary_is_rooted_where_it_runs() {
         paths(&root, "skipped"),
         ["Cargo.lock", "logo.png", "tests/novel_test.rs"]
     );
+    assert_eq!(root["root"], "", "a run at the root is rooted nowhere else");
 }
 
 /// A glob reads from where the run stands, like every other path it
