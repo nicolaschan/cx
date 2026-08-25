@@ -14,7 +14,7 @@ use cx_core::{Attribution, Scorer};
 use serde::Serialize;
 
 use crate::filter::Filter;
-use crate::git::{Change, Git, Side, Status};
+use crate::git::{Git, Side, Status};
 use crate::progress::Progress;
 use crate::scope::Scope;
 use crate::strip;
@@ -113,48 +113,39 @@ fn prepare(filter: &Filter, comments: bool, path: &str, raw: Vec<u8>) -> Prepare
     }
 }
 
-/// `f` over every item, spread across the cores, in the caller.s order.
-/// Order is not a convenience here: the chain rule scores a file against
-/// the ones before it, so a permutation silently changes every score.
-fn par_map<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync) -> Vec<R> {
-    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let mut rest = items;
-    let per_core = rest.len().div_ceil(cores);
-    let mut lanes: Vec<Vec<T>> = Vec::new();
-    while !rest.is_empty() {
-        let tail = rest.split_off(per_core.min(rest.len()));
-        lanes.push(std::mem::replace(&mut rest, tail));
-    }
-    let f = &f;
-    std::thread::scope(|scope| {
-        lanes
-            .into_iter()
-            .map(|lane| scope.spawn(move || lane.into_iter().map(f).collect::<Vec<R>>()))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flat_map(|lane| lane.join().expect("prepare thread"))
-            .collect()
-    })
-}
-
 /// Every path with a blob, prepared, in the order `paths` was given.
 /// Paths whose blob is missing (a submodule, a file gone from disk) are
 /// simply absent. Preparing a blob is a pure function of that blob, so
-/// the whole load is one parallel map.
+/// the paths are cut into one lane per core and prepared at once — into
+/// contiguous lanes, because the chain rule scores a file against the
+/// ones before it and a permutation would silently change every score.
 fn load<'a>(
     filter: &Filter,
     comments: bool,
     paths: &[&'a str],
-    blobs: Vec<Option<Vec<u8>>>,
+    mut blobs: Vec<Option<Vec<u8>>>,
 ) -> Vec<(&'a str, Prepared)> {
-    let present: Vec<(&'a str, Vec<u8>)> = paths
-        .iter()
-        .copied()
-        .zip(blobs)
-        .filter_map(|(path, blob)| Some((path, blob?)))
-        .collect();
-    par_map(present, |(path, raw)| {
-        (path, prepare(filter, comments, path, raw))
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let per_lane = blobs.len().div_ceil(cores).max(1);
+    std::thread::scope(|scope| {
+        paths
+            .chunks(per_lane)
+            .zip(blobs.chunks_mut(per_lane))
+            .map(|(paths, blobs)| {
+                scope.spawn(move || {
+                    paths
+                        .iter()
+                        .zip(blobs)
+                        .filter_map(|(path, blob)| {
+                            Some((*path, prepare(filter, comments, path, blob.take()?)))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|lane| lane.join().expect("prepare thread"))
+            .collect()
     })
 }
 
@@ -163,22 +154,16 @@ fn code(prepared: Option<&Prepared>) -> Option<&[u8]> {
     prepared?.as_deref().ok()
 }
 
-/// One zstd stream to run: the bytes the compressor is conditioned on,
-/// then the items it attributes.
-pub struct Pass<'a> {
-    reference: Vec<&'a [u8]>,
-    items: Vec<&'a [u8]>,
-}
-
-/// What a pass is conditioned on. A pass whose items are all empty scores
-/// 0 for every one of them however large its reference is, so it is
-/// conditioned on nothing and the compressor never reads the tree —
+/// One stream: `items` attributed against `reference` — or against
+/// nothing, when every item is empty. Such a pass scores 0 for every one
+/// of them however large its reference is, so conditioning it on nothing
+/// leaves the same scores and the compressor never reads the tree;
 /// `cx_core`'s `an_all_empty_pass_is_zero_whatever_its_reference` pins
 /// that the two forms agree.
-fn conditioning<'a>(pass: &'a Pass) -> &'a [&'a [u8]] {
-    match pass.items.iter().all(|item| item.is_empty()) {
-        true => &[],
-        false => &pass.reference,
+fn pass<'a>(scorer: &'a Scorer, reference: &[&'a [u8]], items: &[&'a [u8]]) -> Attribution<'a> {
+    match items.iter().all(|item| item.is_empty()) {
+        true => scorer.attribution(&[], items),
+        false => scorer.attribution(reference, items),
     }
 }
 
@@ -186,19 +171,15 @@ fn conditioning<'a>(pass: &'a Pass) -> &'a [&'a [u8]] {
 /// streams, so they run concurrently, and the bar spans all the bytes
 /// the invocation will compress rather than one view's share of them.
 fn score<const N: usize>(
-    scorer: &Scorer,
     label: &'static str,
-    passes: [Pass; N],
+    passes: [Attribution; N],
     progress: Progress,
 ) -> [Vec<u64>; N] {
-    let streams = passes
-        .each_ref()
-        .map(|pass| scorer.attribution(conditioning(pass), &pass.items));
-    let bar = &progress.bar(label, streams.iter().map(Attribution::bytes).sum());
+    let bar = &progress.bar(label, passes.iter().map(|pass| pass.bytes()).sum());
     std::thread::scope(|scope| {
-        streams
+        passes
             .each_ref()
-            .map(|stream| scope.spawn(move || stream.run(bar)))
+            .map(|pass| scope.spawn(move || pass.run(bar)))
             .map(|stream| stream.join().expect("stream thread"))
     })
 }
@@ -273,14 +254,14 @@ fn serialize_status<S: serde::Serializer>(status: &Status, s: S) -> Result<S::Ok
     })
 }
 
-/// The path the base tree holds a change's old side under, if it has
-/// one: its own, or the name it was renamed from.
-fn old_path(change: &Change) -> Option<&str> {
-    match &change.status {
-        Status::Added => None,
-        Status::Modified | Status::Deleted => Some(&change.path),
-        Status::Renamed { from } => Some(from),
-    }
+/// One changed file with whichever sides exist and passed the filter. A
+/// side the change does not have is the empty file, which scores 0, so
+/// every pass is indexed like `items`.
+struct Item {
+    path: String,
+    status: Status,
+    old: Vec<u8>,
+    new: Vec<u8>,
 }
 
 /// The code an abs run scores, fetched and prepared. The blobs are owned
@@ -324,14 +305,12 @@ impl AbsSources {
 
     /// C(tree): one chain-rule pass over the whole snapshot, with no
     /// reference — each file is conditioned on the ones before it.
-    pub fn passes(&self) -> [Pass<'_>; 1] {
-        [Pass {
-            reference: Vec::new(),
-            items: self.kept.iter().map(|(_, code)| code.as_slice()).collect(),
-        }]
+    pub fn passes<'a>(&'a self, scorer: &'a Scorer) -> [Attribution<'a>; 1] {
+        let kept: Vec<&[u8]> = self.kept.iter().map(|(_, code)| code.as_slice()).collect();
+        [scorer.attribution(&[], &kept)]
     }
 
-    pub fn report(&self, scorer: &Scorer, [tree]: [Vec<u64>; 1]) -> AbsReport {
+    pub fn report(self, scorer: &Scorer, [tree]: [Vec<u64>; 1]) -> AbsReport {
         let mut files: Vec<AbsFile> = self
             .kept
             .iter()
@@ -354,20 +333,17 @@ impl AbsSources {
     }
 }
 
-/// The code a diff run scores, fetched and prepared: both sides' blobs,
-/// the changes worth scoring, and the churn git counted.
+/// The code a diff run scores, fetched and prepared: the base tree, the
+/// items worth scoring, and the churn git counted.
 pub struct DiffSources {
     base: String,
     merge_base: String,
-    /// In-scope paths of the base tree, in the sorted order git produced.
-    tree_paths: Vec<String>,
-    old_tree: HashMap<String, Prepared>,
-    new_contents: HashMap<String, Prepared>,
-    /// Every path a change occupies on either side — what the delta
-    /// passes' neutral reference leaves out.
-    touched: HashSet<String>,
+    /// The kept base tree in the sorted order git produced, each file's
+    /// code paired with whether a change touches it — the flag is what
+    /// the delta passes' neutral reference leaves out.
+    tree: Vec<(bool, Vec<u8>)>,
     /// The changes with at least one scorable side, sorted by path.
-    changes: Vec<Change>,
+    items: Vec<Item>,
     skipped: Vec<Skipped>,
     churn: HashMap<String, (u64, u64)>,
 }
@@ -404,39 +380,42 @@ impl DiffSources {
 
         // The whole old tree plus the new side of every change, each blob
         // filtered and reduced to code once.
-        let owned = |loaded: Vec<(&str, Prepared)>| -> HashMap<String, Prepared> {
-            loaded
-                .into_iter()
-                .map(|(path, prepared)| (path.to_owned(), prepared))
-                .collect()
-        };
-        let old_tree = owned(load(
+        let mut old_tree: HashMap<&str, Prepared> = load(
             &filter,
             opts.comments,
             &tree_refs,
             git.tree_contents(&merge_base, &tree_refs)?,
-        ));
-        let new_contents = owned(load(
+        )
+        .into_iter()
+        .collect();
+        let new_contents: HashMap<&str, Prepared> = load(
             &filter,
             opts.comments,
             &new_side_paths,
             git.contents(opts.side, &new_side_paths)?,
-        ));
+        )
+        .into_iter()
+        .collect();
 
-        // Partition changes into scorable ones and skipped files. A change
+        // Partition changes into scorable items and skipped files. A change
         // is skipped when any side it has fails the filter (e.g. a file that
         // flipped binary→text is skipped whole rather than half-scored).
-        let mut scorable: Vec<Change> = Vec::new();
+        let mut items: Vec<Item> = Vec::new();
         let mut skipped: Vec<Skipped> = Vec::new();
-        let mut touched: HashSet<String> = HashSet::new();
+        let mut touched: HashSet<&str> = HashSet::new();
         for change in &changes {
-            touched.insert(change.path.clone());
-            if let Status::Renamed { from } = &change.status {
-                touched.insert(from.clone());
-            }
-            let old = old_path(change).and_then(|p| old_tree.get(p));
+            touched.insert(change.path.as_str());
+            let old_path = match &change.status {
+                Status::Added => None,
+                Status::Modified | Status::Deleted => Some(change.path.as_str()),
+                Status::Renamed { from } => {
+                    touched.insert(from.as_str());
+                    Some(from.as_str())
+                }
+            };
+            let old = old_path.and_then(|p| old_tree.get(p));
             let new = (change.status != Status::Deleted)
-                .then(|| new_contents.get(&change.path))
+                .then(|| new_contents.get(change.path.as_str()))
                 .flatten();
             if let Some(reason) = [new, old]
                 .into_iter()
@@ -449,112 +428,87 @@ impl DiffSources {
                 });
                 continue;
             }
-            if code(old).is_none() && code(new).is_none() {
+            let (old, new) = (code(old), code(new));
+            if old.is_none() && new.is_none() {
                 continue;
             }
-            scorable.push(change.clone());
+            items.push(Item {
+                path: change.path.clone(),
+                status: change.status.clone(),
+                old: old.unwrap_or_default().to_vec(),
+                new: new.unwrap_or_default().to_vec(),
+            });
         }
-        scorable.sort_by(|a, b| a.path.cmp(&b.path));
+        items.sort_by(|a, b| a.path.cmp(&b.path));
+
+        // The universe is kept files only: a file the filter excludes exists
+        // in no reference and no scoring pass.
+        let tree: Vec<(bool, Vec<u8>)> = tree_refs
+            .iter()
+            .filter_map(|p| Some((touched.contains(p), old_tree.remove(p)?.ok()?)))
+            .collect();
 
         Ok(DiffSources {
             churn: git.line_counts(&merge_base, opts.side)?,
             base,
             merge_base,
-            tree_paths,
-            old_tree,
-            new_contents,
-            touched,
-            changes: scorable,
+            tree,
+            items,
             skipped,
         })
     }
 
-    /// A change's old side: the file as the base tree had it. A side a
-    /// change does not have is the empty file, which scores 0, so every
-    /// pass is indexed like `changes`.
-    fn old_side(&self, change: &Change) -> &[u8] {
-        old_path(change)
-            .and_then(|path| code(self.old_tree.get(path)))
-            .unwrap_or_default()
-    }
-
-    /// A change's new side, by the same rule. A deleted path was never
-    /// fetched, so the lookup misses and the empty file is the answer.
-    fn new_side(&self, change: &Change) -> &[u8] {
-        code(self.new_contents.get(&change.path)).unwrap_or_default()
-    }
-
-    /// The universe is kept files only: a file the filter excludes exists
-    /// in no reference and no scoring pass.
-    fn kept_tree(&self) -> impl Iterator<Item = (&str, &[u8])> {
-        self.tree_paths
-            .iter()
-            .filter_map(|path| Some((path.as_str(), code(self.old_tree.get(path))?)))
-    }
-
     /// Metric 1 is new against the full old tree; metric 2 is new minus
     /// old, each against the neutral remainder.
-    pub fn passes(&self) -> [Pass<'_>; 3] {
-        let tree: Vec<&[u8]> = self.kept_tree().map(|(_, code)| code).collect();
+    pub fn passes<'a>(&'a self, scorer: &'a Scorer) -> [Attribution<'a>; 3] {
+        let tree: Vec<&[u8]> = self.tree.iter().map(|(_, code)| code.as_slice()).collect();
         let remainder: Vec<&[u8]> = self
-            .kept_tree()
-            .filter(|(path, _)| !self.touched.contains(*path))
-            .map(|(_, code)| code)
+            .tree
+            .iter()
+            .filter(|(touched, _)| !touched)
+            .map(|(_, code)| code.as_slice())
             .collect();
-        let new: Vec<&[u8]> = self.changes.iter().map(|c| self.new_side(c)).collect();
-        let old: Vec<&[u8]> = self.changes.iter().map(|c| self.old_side(c)).collect();
+        let new: Vec<&[u8]> = self.items.iter().map(|i| i.new.as_slice()).collect();
+        let old: Vec<&[u8]> = self.items.iter().map(|i| i.old.as_slice()).collect();
         [
-            Pass {
-                reference: tree,
-                items: new.clone(),
-            },
-            Pass {
-                reference: remainder.clone(),
-                items: new,
-            },
-            Pass {
-                reference: remainder,
-                items: old,
-            },
+            pass(scorer, &tree, &new),
+            pass(scorer, &remainder, &new),
+            pass(scorer, &remainder, &old),
         ]
     }
 
     pub fn report(
-        &self,
+        self,
         scorer: &Scorer,
         [review, delta_new, delta_old]: [Vec<u64>; 3],
     ) -> DiffReport {
-        let mut files: Vec<DiffFile> = self
-            .changes
-            .iter()
-            .enumerate()
-            .map(|(i, change)| {
-                let new_lines = lines(self.new_side(change));
-                DiffFile {
-                    path: change.path.clone(),
-                    status: change.status.clone(),
-                    review_bytes: review[i],
-                    delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
-                    new_lines,
-                    bytes_per_line: (change.status == Status::Added && new_lines > 0)
-                        .then(|| review[i] as f64 / new_lines as f64),
-                    density_outlier: false,
-                }
-            })
-            .collect();
+        let mut files = Vec::with_capacity(self.items.len());
+        for (i, item) in self.items.iter().enumerate() {
+            let new_lines = lines(&item.new);
+            files.push(DiffFile {
+                path: item.path.clone(),
+                status: item.status.clone(),
+                review_bytes: review[i],
+                delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
+                new_lines,
+                bytes_per_line: (item.status == Status::Added && new_lines > 0)
+                    .then(|| review[i] as f64 / new_lines as f64),
+                density_outlier: false,
+            });
+        }
         flag_density_outliers(&mut files);
         files.sort_by_key(|f| Reverse(f.review_bytes));
 
         let (added_lines, deleted_lines) = self
-            .changes
+            .items
             .iter()
-            .filter_map(|change| self.churn.get(&change.path))
+            .filter_map(|item| self.churn.get(&item.path))
             .fold((0, 0), |(a, d), (added, deleted)| (a + added, d + deleted));
 
         DiffReport {
             version: VersionInfo::for_scorer(scorer),
-            base: self.base.clone(),
-            merge_base: self.merge_base.clone(),
+            base: self.base,
+            merge_base: self.merge_base,
             totals: Totals {
                 review_bytes: files.iter().map(|f| f.review_bytes).sum(),
                 delta_bytes: files.iter().map(|f| f.delta_bytes).sum(),
@@ -562,14 +516,7 @@ impl DiffSources {
                 deleted_lines,
             },
             files,
-            skipped: self
-                .skipped
-                .iter()
-                .map(|skip| Skipped {
-                    path: skip.path.clone(),
-                    reason: skip.reason.clone(),
-                })
-                .collect(),
+            skipped: self.skipped,
         }
     }
 }
@@ -577,14 +524,14 @@ impl DiffSources {
 pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffReport> {
     let sources = DiffSources::fetch(git, opts)?;
     let scorer = Scorer::default();
-    let scores = score(&scorer, "diff", sources.passes(), progress);
+    let scores = score("diff", sources.passes(&scorer), progress);
     Ok(sources.report(&scorer, scores))
 }
 
 pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport> {
     let sources = AbsSources::fetch(git, opts)?;
     let scorer = Scorer::default();
-    let scores = score(&scorer, "C(tree)", sources.passes(), progress);
+    let scores = score("C(tree)", sources.passes(&scorer), progress);
     Ok(sources.report(&scorer, scores))
 }
 
@@ -602,18 +549,13 @@ pub fn overview(
     let (tree_sources, diff_sources) = std::thread::scope(|scope| {
         let tree = scope.spawn(|| AbsSources::fetch(git, &tree_opts));
         let diff = DiffSources::fetch(git, opts);
-        (tree.join().expect("fetch thread"), diff)
-    });
-    let (tree_sources, diff_sources) = (tree_sources?, diff_sources?);
+        anyhow::Ok((tree.join().expect("fetch thread")?, diff?))
+    })?;
     let scorer = Scorer::default();
-    let [tree] = tree_sources.passes();
-    let [review, delta_new, delta_old] = diff_sources.passes();
-    let [tree, review, delta_new, delta_old] = score(
-        &scorer,
-        "scoring",
-        [tree, review, delta_new, delta_old],
-        progress,
-    );
+    let [tree] = tree_sources.passes(&scorer);
+    let [review, delta_new, delta_old] = diff_sources.passes(&scorer);
+    let [tree, review, delta_new, delta_old] =
+        score("scoring", [tree, review, delta_new, delta_old], progress);
     Ok((
         tree_sources.report(&scorer, [tree]),
         diff_sources.report(&scorer, [review, delta_new, delta_old]),

@@ -58,15 +58,17 @@ impl Scorer {
         self.attribution(reference, &[input]).run(|_| {})[0]
     }
 
+    /// A stream the caller can hold onto: it borrows the parts, not the
+    /// lists, so the vectors that named them need not outlive it.
     pub fn attribution<'a>(
         &'a self,
-        reference: &'a [&'a [u8]],
-        items: &'a [&'a [u8]],
+        reference: &[&'a [u8]],
+        items: &[&'a [u8]],
     ) -> Attribution<'a> {
         Attribution {
             scorer: self,
-            reference,
-            items,
+            reference: reference.to_vec(),
+            items: items.to_vec(),
         }
     }
 
@@ -85,8 +87,8 @@ impl Scorer {
 /// near-free afterwards.
 pub struct Attribution<'a> {
     scorer: &'a Scorer,
-    reference: &'a [&'a [u8]],
-    items: &'a [&'a [u8]],
+    reference: Vec<&'a [u8]>,
+    items: Vec<&'a [u8]>,
 }
 
 impl Attribution<'_> {
@@ -94,7 +96,7 @@ impl Attribution<'_> {
     pub fn bytes(&self) -> u64 {
         self.reference
             .iter()
-            .chain(self.items)
+            .chain(&self.items)
             .map(|part| part.len() as u64)
             .sum()
     }
@@ -134,7 +136,7 @@ impl Attribution<'_> {
             progress(part.len() as u64);
             out.len() as u64
         };
-        for part in self.reference {
+        for part in &self.reference {
             feed(part);
         }
         self.items.iter().map(|item| feed(item)).collect()
