@@ -453,4 +453,22 @@ mod tests {
         let src = "// c\n\nlet s = \"x\";\n";
         assert_eq!(strip_keeping("a.rs", src, keep), src);
     }
+
+    #[test]
+    fn non_nesting_block_comments_close_at_the_first_terminator() {
+        assert_eq!(strip("a.c", "/* x /* y */ int z;\n"), " int z;\n");
+    }
+
+    #[test]
+    fn a_lone_backslash_at_the_end_cannot_escape_past_it() {
+        assert_eq!(strip("a.rs", "let s = \"abc\\"), "let s = \"\n");
+        let keep = Keep {
+            comments: false,
+            strings: true,
+        };
+        assert_eq!(
+            strip_keeping("a.rs", "let s = \"abc\\", keep),
+            "let s = \"abc\\\n"
+        );
+    }
 }

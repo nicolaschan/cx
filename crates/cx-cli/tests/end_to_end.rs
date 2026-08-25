@@ -628,6 +628,11 @@ fn comments_are_stripped_unless_asked_to_score_them() {
         assert!(kept["delta_bytes"].as_f64().unwrap() > 300.0);
     }
     assert_eq!(run(Some("1"), Some("--comments=false"))["new_lines"], 120);
+    assert_eq!(
+        run(Some("0"), None)["new_lines"],
+        120,
+        "a falsy pin must not mean true"
+    );
 }
 
 /// The mirror of the add case: deleting a file's comments is also ≈ free,
@@ -834,12 +839,11 @@ fn string_contents_are_stripped_unless_asked_to_score_them() {
         );
         assert!(kept["delta_bytes"].as_f64().unwrap() > 300.0);
     }
-    assert!(
-        run(Some("1"), Some("--strings=false"))["review_bytes"]
-            .as_f64()
-            .unwrap()
-            < 64.0
-    );
+    // Vetoed and falsy-pinned runs strip like the default: a set
+    // variable must not mean "true" whatever its value.
+    for (pinned, flag) in [(Some("1"), Some("--strings=false")), (Some("0"), None)] {
+        assert!(run(pinned, flag)["review_bytes"].as_f64().unwrap() < 64.0);
+    }
 }
 
 /// Data files are out of the universe by default and fully scored on
@@ -932,6 +936,92 @@ fn data_files_are_skipped_by_default_and_scored_on_request() {
             assert!(!skipped_as_data(&report, path));
         }
     }
+
+    // The same knob reaches abs: the data file joins C(tree) only on
+    // request.
+    let abs_lists_rows = |flag: Option<&str>| -> bool {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+        cmd.current_dir(root)
+            .args(["abs", "--json"])
+            .args(flag)
+            .env_remove("CX_DATA");
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "rows.csv")
+    };
+    assert!(!abs_lists_rows(None));
+    assert!(abs_lists_rows(Some("--data")));
+}
+
+/// Common flags mean the same thing on either side of the subcommand: a
+/// flag given before `diff` must reach scoring, not silently vanish
+/// into an unread copy of the parse tree.
+#[test]
+fn flags_before_the_subcommand_are_honored() {
+    let (dir, _git) = repo_with(&[("src/lib.rs", gen_code(1, 40))]);
+    fs::write(dir.path().join("rows.csv"), gen_code(31, 40)).unwrap();
+
+    let scored_paths = |args: &[&str]| -> Vec<String> {
+        let out = Command::new(env!("CARGO_BIN_EXE_cx"))
+            .current_dir(dir.path())
+            .args(args)
+            .env_remove("CX_DATA")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut paths: Vec<String> = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_owned())
+            .collect();
+        paths.sort();
+        paths
+    };
+
+    let before = scored_paths(&["--data=true", "diff", "--json"]);
+    let after = scored_paths(&["diff", "--json", "--data=true"]);
+    assert!(after.contains(&"rows.csv".to_owned()));
+    assert_eq!(before, after, "flag position must not change the run");
+}
+
+/// --base reaches ref resolution: an explicit base equal to the default
+/// changes nothing, and one that resolves to no commit is an error.
+#[test]
+fn an_explicit_base_resolves_and_a_bogus_one_fails() {
+    let (dir, _git) = setup();
+    let run = |extra: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+        cmd.current_dir(dir.path())
+            .args(["diff", "--json", "--committed"])
+            .args(extra)
+            .env_remove("CX_BASE");
+        cmd.output().unwrap()
+    };
+    let totals =
+        |out: &[u8]| serde_json::from_slice::<serde_json::Value>(out).unwrap()["totals"].clone();
+
+    let explicit = run(&["--base", "main"]);
+    assert!(explicit.status.success());
+    assert_eq!(totals(&explicit.stdout), totals(&run(&[]).stdout));
+
+    let bogus = run(&["--base", "nope"]);
+    assert!(!bogus.status.success());
+    assert!(String::from_utf8_lossy(&bogus.stderr).contains("does not resolve"));
 }
 
 /// A one-commit repo holding exactly these files.

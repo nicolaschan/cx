@@ -25,22 +25,23 @@ struct Cli {
     common: CommonArgs,
 }
 
-/// Flags every view accepts, declared once so a default pinned through
-/// the environment means the same thing in all of them.
+/// Flags every view accepts, declared once — globally, so a flag means
+/// the same thing wherever it appears, before or after the subcommand.
 #[derive(Args)]
 struct CommonArgs {
     /// Score the index: staged changes only.
-    #[arg(long, conflicts_with = "committed")]
+    #[arg(long, global = true, conflicts_with = "committed")]
     staged: bool,
     /// Score HEAD: committed code only, ignoring the index and the
     /// working tree.
-    #[arg(long)]
+    #[arg(long, global = true)]
     committed: bool,
     /// Score test files too. They are excluded by default, by naming
     /// convention. Takes an optional value so a pinned default can be
     /// vetoed for one run: `--include-tests=false`.
     #[arg(
         long,
+        global = true,
         env = "CX_INCLUDE_TESTS",
         num_args = 0..=1,
         default_value_t = false,
@@ -54,6 +55,7 @@ struct CommonArgs {
     /// be vetoed for one run: `--comments=false`.
     #[arg(
         long,
+        global = true,
         env = "CX_COMMENTS",
         num_args = 0..=1,
         default_value_t = false,
@@ -67,6 +69,7 @@ struct CommonArgs {
     /// default can be vetoed for one run: `--strings=false`.
     #[arg(
         long,
+        global = true,
         env = "CX_STRINGS",
         num_args = 0..=1,
         default_value_t = false,
@@ -80,6 +83,7 @@ struct CommonArgs {
     /// default can be vetoed for one run: `--prose=false`.
     #[arg(
         long,
+        global = true,
         env = "CX_PROSE",
         num_args = 0..=1,
         default_value_t = false,
@@ -93,6 +97,7 @@ struct CommonArgs {
     /// a pinned default can be vetoed for one run: `--data=false`.
     #[arg(
         long,
+        global = true,
         env = "CX_DATA",
         num_args = 0..=1,
         default_value_t = false,
@@ -104,18 +109,24 @@ struct CommonArgs {
     /// syntax, `!` excludes, and among globs the last match wins. Paths
     /// outside the scope are not scored and not part of the reference —
     /// `-g 'crates/api/**'` sizes that subtree as its own codebase.
-    #[arg(short = 'g', long = "glob", env = "CX_GLOB", value_name = "GLOB")]
+    #[arg(
+        short = 'g',
+        long = "glob",
+        global = true,
+        env = "CX_GLOB",
+        value_name = "GLOB"
+    )]
     globs: Vec<String>,
     /// Hide the per-file breakdown; show the summary line only.
-    #[arg(long)]
+    #[arg(long, global = true)]
     no_files: bool,
     /// Show only the N biggest files/directories in the breakdown.
-    #[arg(short = 'n', long, env = "CX_TOP", default_value_t = 30)]
+    #[arg(short = 'n', long, global = true, env = "CX_TOP", default_value_t = 30)]
     top: usize,
     /// Also show compressor provenance and the skipped files by name.
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long, global = true)]
     verbose: bool,
-    #[arg(long)]
+    #[arg(long, global = true)]
     json: bool,
 }
 
@@ -123,7 +134,7 @@ struct CommonArgs {
 #[derive(Args)]
 struct DiffArgs {
     /// Base ref to diff against (default: main/master merge-base).
-    #[arg(long, env = "CX_BASE")]
+    #[arg(long, global = true, env = "CX_BASE")]
     base: Option<String>,
 }
 
@@ -167,18 +178,11 @@ enum Cmd {
     /// Score the changes between a base branch and the working tree, the
     /// index, or HEAD.
     Diff {
-        #[command(flatten)]
-        diff: DiffArgs,
         #[arg(long, value_enum, default_value = "file")]
         granularity: Granularity,
-        #[command(flatten)]
-        common: CommonArgs,
     },
     /// Absolute C(tree) — the trend-line number.
-    Abs {
-        #[command(flatten)]
-        common: CommonArgs,
-    },
+    Abs,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -203,34 +207,31 @@ fn main() -> Result<()> {
     let progress = Progress {
         visible: std::io::stderr().is_terminal(),
     };
+    let common = cli.common;
+    let base = cli.diff.base.as_deref();
     match cli.cmd {
         None => {
-            let common = cli.common;
             let opts = common.options();
             let abs = pipeline::abs(&git, &opts, progress)?;
-            let diff = pipeline::diff(&git, cli.diff.base.as_deref(), &opts, progress)?;
+            let diff = pipeline::diff(&git, base, &opts, progress)?;
             emit(
                 common.json,
                 &serde_json::json!({ "abs": abs, "diff": diff }),
                 report::render_overview(&abs, &diff, common.report_options()),
             )?;
         }
-        Some(Cmd::Diff {
-            diff,
-            granularity,
-            common,
-        }) => {
+        Some(Cmd::Diff { granularity }) => {
             if matches!(granularity, Granularity::Hunk) {
                 bail!("hunk granularity is not implemented yet (plan phase 3)");
             }
-            let report = pipeline::diff(&git, diff.base.as_deref(), &common.options(), progress)?;
+            let report = pipeline::diff(&git, base, &common.options(), progress)?;
             emit(
                 common.json,
                 &report,
                 report::render_diff(&report, common.report_options()),
             )?;
         }
-        Some(Cmd::Abs { common }) => {
+        Some(Cmd::Abs) => {
             let report = pipeline::abs(&git, &common.options(), progress)?;
             emit(
                 common.json,

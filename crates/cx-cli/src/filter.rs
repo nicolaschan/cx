@@ -427,6 +427,13 @@ mod tests {
         ] {
             assert_eq!(f.exclusion(path, b"data"), Some("data"), "{path}");
         }
+        // The extension is case-insensitive and must be the file's own:
+        // a dot inside a directory name never matches, because no data
+        // extension contains a slash.
+        assert_eq!(f.exclusion("export/ROWS.CSV", b"data"), Some("data"));
+        assert_eq!(f.exclusion("dir.v1/rows.csv", b"data"), Some("data"));
+        assert_eq!(f.exclusion("data.json/notes.rs", b"code"), None);
+        assert_eq!(f.exclusion("data.json/Makefile", b"code"), None);
         // Config and markup stay code, and so does a language that
         // merely compiles *to* data.
         for path in [
