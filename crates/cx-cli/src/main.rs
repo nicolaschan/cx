@@ -13,6 +13,10 @@ use cx_cli::report;
 /// new information content adds, conditioned on what the codebase
 /// already contains. With no subcommand, shows one merged breakdown:
 /// the tree's complexity per file/directory plus the diff's ΔCX.
+///
+/// A run measures the directory it is started in — the whole repository
+/// at its root, and inside a subdirectory that subtree as its own
+/// codebase, with paths named from there.
 #[derive(Parser)]
 #[command(name = "cx", version)]
 struct Cli {
@@ -73,10 +77,11 @@ struct CommonArgs {
         value_parser = BoolishValueParser::new(),
     )]
     prose: bool,
-    /// Restrict the run to paths matching GLOB. Repeatable; gitignore
-    /// syntax, `!` excludes, and among globs the last match wins. Paths
-    /// outside the scope are not scored and not part of the reference —
-    /// `-g 'crates/api/**'` sizes that subtree as its own codebase.
+    /// Restrict the run to paths matching GLOB, read from the directory
+    /// cx runs in. Repeatable; gitignore syntax, `!` excludes, and among
+    /// globs the last match wins. Paths outside the scope are not scored
+    /// and not part of the reference — `-g 'crates/api/**'` sizes that
+    /// subtree as its own codebase, as running inside it does.
     #[arg(short = 'g', long = "glob", env = "CX_GLOB", value_name = "GLOB")]
     globs: Vec<String>,
     /// Hide the per-file breakdown; show the summary line only.

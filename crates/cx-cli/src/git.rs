@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 
 pub struct Git {
     root: PathBuf,
+    prefix: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -51,24 +52,34 @@ impl Git {
         Self::discover_at(Path::new("."))
     }
 
-    /// The repository containing `dir`.
+    /// The repository containing `dir`, and where `dir` sits inside it.
     pub fn discover_at(dir: &Path) -> Result<Self> {
         let out = Command::new("git")
             .current_dir(dir)
-            .args(["rev-parse", "--show-toplevel"])
+            .args(["rev-parse", "--show-toplevel", "--show-prefix"])
             .output()
             .context("running git")?;
         if !out.status.success() {
             bail!("not inside a git repository");
         }
-        let root = String::from_utf8(out.stdout)?.trim().to_owned();
+        let out = String::from_utf8(out.stdout)?;
+        let mut lines = out.lines();
+        let root = lines.next().context("git named no repository root")?;
         Ok(Git {
             root: PathBuf::from(root),
+            prefix: lines.next().unwrap_or_default().to_owned(),
         })
     }
 
     pub fn root(&self) -> &PathBuf {
         &self.root
+    }
+
+    /// Where the repository was entered, relative to its root: empty at
+    /// the root itself, otherwise a directory with its trailing slash,
+    /// as `git rev-parse --show-prefix` writes it.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
     }
 
     fn run(&self, args: &[&str]) -> Result<Vec<u8>> {

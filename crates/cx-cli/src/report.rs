@@ -210,11 +210,15 @@ fn view<'a>(
 fn footer(
     opts: Options,
     version: &VersionInfo,
+    root: &str,
     abs: Option<&AbsReport>,
     diff: Option<&DiffReport>,
 ) -> String {
     let mut summary = Vec::new();
     let mut details = Vec::new();
+    if !root.is_empty() {
+        details.push(opts.dim(format!("rooted at {}", root.trim_end_matches('/'))));
+    }
     if let Some(abs) = abs {
         summary.push(opts.stat("C(tree)", fmt_bytes(abs.compressed_bytes as f64), None));
         details.push(opts.dim(format!(
@@ -266,7 +270,7 @@ pub fn render_diff(report: &DiffReport, opts: Options) -> String {
         total,
         opts,
         Some("REVIEW"),
-        footer(opts, &report.version, None, Some(report)),
+        footer(opts, &report.version, &report.root, None, Some(report)),
     )
 }
 
@@ -297,7 +301,7 @@ pub fn render_overview(abs: &AbsReport, diff: &DiffReport, opts: Options) -> Str
         total,
         opts,
         Some("BYTES"),
-        footer(opts, &abs.version, Some(abs), Some(diff)),
+        footer(opts, &abs.version, &abs.root, Some(abs), Some(diff)),
     )
 }
 
@@ -312,7 +316,7 @@ pub fn render_abs(report: &AbsReport, opts: Options) -> String {
         total,
         opts,
         None,
-        footer(opts, &report.version, Some(report), None),
+        footer(opts, &report.version, &report.root, Some(report), None),
     )
 }
 
@@ -355,6 +359,7 @@ mod tests {
     fn abs_report() -> AbsReport {
         AbsReport {
             version: version(),
+            root: String::new(),
             snapshot: "HEAD",
             file_count: 2,
             raw_bytes: 40960,
@@ -389,6 +394,7 @@ mod tests {
     fn diff_report() -> DiffReport {
         DiffReport {
             version: version(),
+            root: String::new(),
             base: "master".into(),
             merge_base: "abc123".into(),
             files: vec![diff_file(Status::Modified, false)],
@@ -441,6 +447,27 @@ mod tests {
                  \x20skipped: Cargo.lock (generated/vendored pattern)\n\
                  \x20zstd 1.5.7, level 19, window≤2^31\n"
             )
+        );
+    }
+
+    /// A run below the repository root measures a subtree, and says so
+    /// where it says what else it measured — the paths it prints are
+    /// relative to that directory, and without it they name nothing.
+    #[test]
+    fn verbose_names_the_directory_a_run_is_rooted_in() {
+        let opts = Options {
+            verbose: true,
+            ..OPTS
+        };
+        let mut abs = abs_report();
+        abs.root = "crates/cx-cli/".into();
+        assert!(
+            footer(&abs, &diff_report(), opts).contains(" rooted at crates/cx-cli\n"),
+            "the run's root belongs in the details"
+        );
+        assert!(
+            !footer(&abs_report(), &diff_report(), opts).contains("rooted at"),
+            "a run at the repository root has nowhere else to be"
         );
     }
 

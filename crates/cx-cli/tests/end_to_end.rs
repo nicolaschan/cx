@@ -886,3 +886,152 @@ fn an_excluding_glob_drops_just_its_matches() {
         .collect();
     assert_eq!(paths(&without), expected);
 }
+
+/// Where cx is run is what cx measures. A run inside `alpha/` sizes that
+/// subtree as its own codebase and names its files as they read from
+/// there — the same report as a repository that only ever held them.
+#[test]
+fn a_run_inside_a_subdirectory_equals_a_repo_holding_only_that_subtree() {
+    let (whole_dir, _whole) = repo_with(&[
+        ("alpha/a.rs", gen_code(1, 120)),
+        ("alpha/b.rs", gen_code(2, 120)),
+        ("beta/c.rs", gen_code(3, 120)),
+        ("beta/d.rs", gen_code(4, 120)),
+    ]);
+    let inside = Git::discover_at(&whole_dir.path().join("alpha")).unwrap();
+    let (_alone_dir, alone) = repo_with(&[("a.rs", gen_code(1, 120)), ("b.rs", gen_code(2, 120))]);
+
+    let measure =
+        |repo: &Git| pipeline::abs(repo, &AbsOptions::default(), Progress::default()).unwrap();
+    let (from_inside, whole_repo) = (measure(&inside), measure(&alone));
+
+    let scores = |r: &pipeline::AbsReport| -> Vec<(String, u64)> {
+        r.files.iter().map(|f| (f.path.clone(), f.bytes)).collect()
+    };
+    assert_eq!(scores(&from_inside), scores(&whole_repo));
+    assert_eq!(from_inside.compressed_bytes, whole_repo.compressed_bytes);
+}
+
+/// The same, through the binary: the process's directory is the run's
+/// root, so a rename inside it reads as one and the repository's other
+/// files are absent — not scored, and not skipped either.
+#[test]
+fn the_binary_is_rooted_where_it_runs() {
+    let (dir, _git) = setup();
+    let run = |cwd: &Path| -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_cx"))
+            .current_dir(cwd)
+            .args(["diff", "--json"])
+            .env_remove("CX_GLOB")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let paths = |report: &serde_json::Value, key: &str| -> Vec<String> {
+        let mut paths: Vec<String> = report[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_owned())
+            .collect();
+        paths.sort();
+        paths
+    };
+
+    let inside = run(&dir.path().join("src"));
+    assert_eq!(paths(&inside, "files"), ["gone.rs", "moved.rs", "novel.rs"]);
+    assert_eq!(
+        inside["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == "moved.rs")
+            .unwrap()["status"],
+        "renamed from mover.rs"
+    );
+    assert!(
+        paths(&inside, "skipped").is_empty(),
+        "the root's lockfile and binary are outside this run entirely"
+    );
+
+    // At the root the same repository reports its whole self.
+    let root = run(dir.path());
+    assert_eq!(
+        paths(&root, "files"),
+        ["src/gone.rs", "src/moved.rs", "src/novel.rs"]
+    );
+    assert_eq!(
+        paths(&root, "skipped"),
+        ["Cargo.lock", "logo.png", "tests/novel_test.rs"]
+    );
+}
+
+/// A glob reads from where the run stands, like every other path it
+/// names: `-g 'novel.rs'` in `src/` selects `src/novel.rs`, while one
+/// anchored at the repository root names nothing there.
+#[test]
+fn globs_read_from_the_directory_the_run_is_in() {
+    let (dir, _git) = setup();
+    let inside = Git::discover_at(&dir.path().join("src")).unwrap();
+    let paths = |globs: &[&str]| -> Vec<String> {
+        let report = pipeline::diff(
+            &inside,
+            &DiffOptions {
+                side: Side::Head,
+                globs: globs.iter().map(|g| (*g).to_owned()).collect(),
+                ..Default::default()
+            },
+            Progress::default(),
+        )
+        .unwrap();
+        let mut paths: Vec<String> = report.files.iter().map(|f| f.path.clone()).collect();
+        paths.sort();
+        paths
+    };
+
+    assert_eq!(paths(&["novel.rs"]), ["novel.rs"]);
+    assert_eq!(paths(&["!novel.rs"]), ["gone.rs", "moved.rs"]);
+    assert!(paths(&["src/**"]).is_empty());
+}
+
+/// A rename whose source is outside the run is an add here: the file it
+/// came from is not part of this codebase, which is exactly how the
+/// score already reads it.
+#[test]
+fn a_rename_from_outside_the_run_reads_as_an_add() {
+    let (dir, _repo) = repo_with(&[
+        ("alpha/keep.rs", gen_code(1, 120)),
+        ("outside/moving.rs", gen_code(2, 120)),
+    ]);
+    let root = dir.path();
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    git(root, &["mv", "outside/moving.rs", "alpha/moving.rs"]);
+    git(root, &["commit", "-q", "-m", "move in"]);
+
+    let inside = Git::discover_at(&root.join("alpha")).unwrap();
+    let report = pipeline::diff(
+        &inside,
+        &DiffOptions {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+
+    let moved = report
+        .files
+        .iter()
+        .find(|f| f.path == "moving.rs")
+        .expect("the file arriving in this subtree must be reported");
+    assert_eq!(moved.status, Status::Added);
+    assert!(
+        moved.review_bytes > 500,
+        "content new to this codebase must cost review attention"
+    );
+}
