@@ -31,7 +31,7 @@ impl Options {
     }
 }
 
-fn entry<'a>(path: &'a str, bytes: f64, lines: u64, change: Option<&DiffFile>) -> Entry<'a> {
+fn entry<'a>(path: &'a str, bytes: f64, lines: i64, change: Option<&DiffFile>) -> Entry<'a> {
     Entry {
         path,
         bytes,
@@ -90,18 +90,26 @@ fn num_cell(text: String, color: Option<Color>) -> Cell {
     colored(Cell::new(text).set_alignment(CellAlignment::Right), color)
 }
 
+/// What the diff/abs distinction adds to a table: the ΔCX and marker
+/// columns, and whether LINES reads as a signed change or an absolute count.
+#[derive(Clone, Copy)]
+struct Cols {
+    delta: bool,
+    lines_as_delta: bool,
+}
+
 struct Row {
     bytes: f64,
     delta: Option<f64>,
     marker: Option<String>,
-    lines: Option<u64>,
+    lines: Option<i64>,
     label: String,
     is_dir: bool,
     dim: bool,
 }
 
 impl Row {
-    fn push_onto(self, table: &mut Table, total: f64, show_delta: bool) {
+    fn push_onto(self, table: &mut Table, total: f64, cols: Cols) {
         let dim = self.dim.then_some(Color::DarkGrey);
         let share = 100.0 * self.bytes / total;
         let filled = ((share / 10.0).round() as usize).min(10);
@@ -109,7 +117,7 @@ impl Row {
             fmt_bytes(self.bytes),
             dim.or_else(|| score_color(self.bytes)),
         )];
-        if show_delta {
+        if cols.delta {
             cells.push(self.delta.map_or_else(
                 || Cell::new(""),
                 |d| num_cell(fmt_signed(d), dim.or_else(|| score_color(d))),
@@ -123,8 +131,15 @@ impl Row {
         if self.is_dir {
             path_cell = path_cell.add_attribute(Attribute::Bold);
         }
+        let lines = self.lines.map_or("-".to_owned(), |l| {
+            if cols.lines_as_delta {
+                fmt_delta_lines(l)
+            } else {
+                l.to_string()
+            }
+        });
         cells.extend([
-            num_cell(self.lines.map_or("-".to_owned(), |l| l.to_string()), dim),
+            num_cell(lines, dim),
             path_cell,
             num_cell(
                 format!(
@@ -139,7 +154,7 @@ impl Row {
     }
 }
 
-fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, show_delta: bool) {
+fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, cols: Cols) {
     let child_count = node.children.len() + usize::from(node.elided.is_some());
     for (i, child) in node.children.iter().enumerate() {
         let is_last = i + 1 == child_count;
@@ -158,9 +173,9 @@ fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, show_
             is_dir: child.is_dir,
             dim: false,
         }
-        .push_onto(table, total, show_delta);
+        .push_onto(table, total, cols);
         let child_prefix = format!("{prefix}{}", if is_last { "  " } else { "│ " });
-        push_children(table, child, &child_prefix, total, show_delta);
+        push_children(table, child, &child_prefix, total, cols);
     }
     if let Some(elided) = &node.elided {
         Row {
@@ -172,7 +187,7 @@ fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, show_
             is_dir: false,
             dim: true,
         }
-        .push_onto(table, total, show_delta);
+        .push_onto(table, total, cols);
     }
 }
 
@@ -181,6 +196,7 @@ fn view<'a>(
     total: f64,
     opts: Options,
     diff_columns: Option<&'static str>,
+    lines_as_delta: bool,
     footer: String,
 ) -> String {
     if !opts.files {
@@ -203,7 +219,11 @@ fn view<'a>(
     table.load_preset(presets::NOTHING);
     table.set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(columns.iter().map(|c| Cell::new(c).fg(Color::DarkGrey)));
-    push_children(&mut table, &root, "", total, diff_columns.is_some());
+    let cols = Cols {
+        delta: diff_columns.is_some(),
+        lines_as_delta,
+    };
+    push_children(&mut table, &root, "", total, cols);
     format!("{table}\n\n{footer}")
 }
 
@@ -260,12 +280,16 @@ pub fn render_diff(report: &DiffReport, opts: Options) -> String {
     let entries = report
         .files
         .iter()
-        .map(|f| entry(&f.path, f.review_bytes as f64, f.new_lines, Some(f)));
+        .map(|f| {
+            let delta = f.added_lines as i64 - f.deleted_lines as i64;
+            entry(&f.path, f.review_bytes as f64, delta, Some(f))
+        });
     view(
         entries,
         total,
         opts,
         Some("REVIEW"),
+        true,
         footer(opts, &report.version, None, Some(report)),
     )
 }
@@ -280,7 +304,7 @@ pub fn render_overview(abs: &AbsReport, diff: &DiffReport, opts: Options) -> Str
             entry(
                 &f.path,
                 f.bytes as f64,
-                f.lines,
+                f.lines as i64,
                 changed.remove(f.path.as_str()),
             )
         })
@@ -297,6 +321,7 @@ pub fn render_overview(abs: &AbsReport, diff: &DiffReport, opts: Options) -> Str
         total,
         opts,
         Some("BYTES"),
+        false,
         footer(opts, &abs.version, Some(abs), Some(diff)),
     )
 }
@@ -306,12 +331,13 @@ pub fn render_abs(report: &AbsReport, opts: Options) -> String {
     let entries = report
         .files
         .iter()
-        .map(|f| entry(&f.path, f.bytes as f64, f.lines, None));
+        .map(|f| entry(&f.path, f.bytes as f64, f.lines as i64, None));
     view(
         entries,
         total,
         opts,
         None,
+        false,
         footer(opts, &report.version, Some(report), None),
     )
 }
@@ -325,6 +351,14 @@ fn fmt_bytes(bytes: f64) -> String {
         format!("{:.1} KB", bytes / 1024.0)
     } else {
         format!("{:.1} MB", bytes / (1024.0 * 1024.0))
+    }
+}
+
+fn fmt_delta_lines(n: i64) -> String {
+    match n {
+        0 => "0".to_owned(),
+        n if n < 0 => format!("−{}", -n),
+        n => format!("+{n}"),
     }
 }
 
@@ -380,6 +414,8 @@ mod tests {
             status,
             review_bytes: 2048,
             delta_bytes: 1024,
+            added_lines: 40,
+            deleted_lines: 12,
             new_lines: 40,
             bytes_per_line: None,
             density_outlier,
@@ -418,6 +454,18 @@ mod tests {
     fn footer(abs: &AbsReport, diff: &DiffReport, opts: Options) -> String {
         let rendered = render_overview(abs, diff, opts);
         rendered.rsplit("\n\n").next().unwrap().to_owned()
+    }
+
+    /// The diff view's LINES column is the file's net line change, signed;
+    /// the overview keeps an absolute count in the same column.
+    #[test]
+    fn diff_lines_column_is_a_signed_delta() {
+        let diff = render_diff(&diff_report(), OPTS);
+        assert!(diff.contains("+28"), "added 40 − deleted 12:\n{diff}");
+
+        let overview = render_overview(&abs_report(), &diff_report(), OPTS);
+        assert!(overview.contains("200"), "abs line count:\n{overview}");
+        assert!(!overview.contains("+28"), "not a delta:\n{overview}");
     }
 
     /// The numbers the run exists to give need no flag; nothing else
