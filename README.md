@@ -21,18 +21,22 @@ Two independent axes per file, one PR total:
 ```console
 $ cx diff
  REVIEW  ΔCX         LINES  PATH                     SHARE
- 4.1 KB  +3.6 KB      1206  ├─┬ crates               █████████░  93.0%
- 4.1 KB  +3.6 KB      1206  │ └─┬ cx-cli             █████████░  93.0%
- 1.5 KB  +1.2 KB       267  │   ├── report.rs        ███░░░░░░░  32.8%
- 1.4 KB  +1.5 KB  +    169  │   ├── breakdown.rs     ███░░░░░░░  30.4%
-     ≈0  −5.0 KB  −      -  │   └── poller.rs        ░░░░░░░░░░   0.1%
- 1.9 KB   +248 B        92  └── README.md            █░░░░░░░░░   9.5%
+ 4.1 KB  +3.6 KB      +436  ├─┬ crates               █████████░  93.0%
+ 4.1 KB  +3.6 KB      +436  │ └─┬ cx-cli             █████████░  93.0%
+ 1.5 KB  +1.2 KB      +698  │   ├── report.rs        ███░░░░░░░  32.8%
+ 1.4 KB  +1.5 KB  +   +169  │   ├── breakdown.rs     ███░░░░░░░  30.4%
+     ≈0  −5.0 KB  −   −431  │   └── poller.rs        ░░░░░░░░░░   0.1%
+ 1.9 KB   +248 B       +92  └── README.md            █░░░░░░░░░   9.5%
 
- review 4.4 KB   ΔCX +3.9 KB   lines +1298 −431   1 skipped
+ review 4.4 KB   ΔCX +3.9 KB   lines +1059 −531   1 skipped
 ```
 
 The `+`/`−`/`→` column marks added, deleted, and renamed files (`⚠` for
 density outliers).
+
+LINES is net churn: added − deleted, so a file that shrank reads `−431`.
+`cx abs` shows the same column as an absolute count, because its bytes
+measure the tree rather than the change.
 
 The footer is colored on the same magnitude scale as the cells above,
 except the line churn — the familiar size the others are read against,
@@ -41,7 +45,7 @@ whatever cx skipped. `--verbose` adds the rest:
 
 ```console
 $ cx --verbose
- C(tree) 23.4 KB   review 4.4 KB   ΔCX +3.9 KB   lines +1298 −431   1 skipped
+ C(tree) 23.4 KB   review 4.4 KB   ΔCX +3.9 KB   lines +1059 −531   1 skipped
  C(tree) over 23 files (83.7 KB raw)
  skipped: Cargo.lock (generated/vendored pattern)
  zstd 1.5.7, level 19, window≤2^31

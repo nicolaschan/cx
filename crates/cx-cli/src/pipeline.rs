@@ -325,7 +325,7 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
     let mut files = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let new_lines = lines(new_items[i]);
-        let (added_lines, deleted_lines) = churn.get(&item.path).copied().unwrap_or((0, 0));
+        let (added_lines, deleted_lines) = churn.get(&item.path).copied().unwrap_or_default();
         files.push(DiffFile {
             path: item.path.clone(),
             status: item.status.clone(),
