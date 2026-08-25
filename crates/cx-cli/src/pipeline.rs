@@ -9,7 +9,7 @@ use cx_core::Scorer;
 use serde::Serialize;
 
 use crate::filter::Filter;
-use crate::git::{Change, Git, Side, Status};
+use crate::git::{Git, Side, Status};
 use crate::progress::Progress;
 use crate::scope::Scope;
 use crate::strip;
@@ -179,22 +179,6 @@ pub struct AbsReport {
     pub files: Vec<AbsFile>,
 }
 
-/// Whether a change is part of this run, reduced to what it is here:
-/// one arriving by rename from outside the scope is a plain add, since
-/// the file it came from is not in this codebase — nothing moved, which
-/// is how the score already reads it.
-fn within(scope: &Scope, change: &mut Change) -> bool {
-    if !scope.allows(&change.path) {
-        return false;
-    }
-    if let Status::Renamed { from } = &change.status
-        && !scope.allows(from)
-    {
-        change.status = Status::Added;
-    }
-    true
-}
-
 /// One changed file with whichever sides exist and passed the filter.
 struct Item<'a> {
     path: String,
@@ -222,7 +206,7 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
     // skipped — it is simply not part of this run's repository.
     let scope = Scope::new(git.root(), git.prefix(), &opts.globs)?;
     let mut changes = git.changes(&merge_base, opts.side)?;
-    changes.retain_mut(|change| within(&scope, change));
+    changes.retain(|c| scope.allows(&c.path));
     let mut tree_paths = git.ls_tree(&merge_base)?;
     tree_paths.retain(|p| scope.allows(p));
     let tree_refs: Vec<&str> = tree_paths.iter().map(String::as_str).collect();
@@ -339,35 +323,38 @@ pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffRep
             .map(|stream| stream.join().expect("stream thread"))
     });
 
-    // Everything git is asked comes first, while the paths are still the
-    // repository's; from here on they are named as the run names them.
+    let mut files = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let new_lines = lines(new_items[i]);
+        // A file that arrived by rename from outside is a plain add
+        // here: the file it came from is not in this codebase, so
+        // nothing moved — which is how the score already read it.
+        let status = match &item.status {
+            Status::Renamed { from } if !scope.allows(from) => Status::Added,
+            Status::Renamed { from } => Status::Renamed {
+                from: scope.name(from).to_owned(),
+            },
+            status => status.clone(),
+        };
+        files.push(DiffFile {
+            path: scope.name(&item.path).to_owned(),
+            review_bytes: review[i],
+            delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
+            new_lines,
+            bytes_per_line: (status == Status::Added && new_lines > 0)
+                .then(|| review[i] as f64 / new_lines as f64),
+            density_outlier: false,
+            status,
+        });
+    }
+    flag_density_outliers(&mut files);
+    files.sort_by_key(|f| Reverse(f.review_bytes));
+
     let churn = git.line_counts(&merge_base, opts.side)?;
     let (added_lines, deleted_lines) = items
         .iter()
         .filter_map(|item| churn.get(&item.path))
         .fold((0, 0), |(a, d), (added, deleted)| (a + added, d + deleted));
-
-    let mut files = Vec::with_capacity(items.len());
-    for (i, item) in items.iter().enumerate() {
-        let new_lines = lines(new_items[i]);
-        files.push(DiffFile {
-            path: scope.name(&item.path).to_owned(),
-            status: match &item.status {
-                Status::Renamed { from } => Status::Renamed {
-                    from: scope.name(from).to_owned(),
-                },
-                status => status.clone(),
-            },
-            review_bytes: review[i],
-            delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
-            new_lines,
-            bytes_per_line: (item.status == Status::Added && new_lines > 0)
-                .then(|| review[i] as f64 / new_lines as f64),
-            density_outlier: false,
-        });
-    }
-    flag_density_outliers(&mut files);
-    files.sort_by_key(|f| Reverse(f.review_bytes));
 
     Ok(DiffReport {
         version: VersionInfo::for_scorer(&scorer),

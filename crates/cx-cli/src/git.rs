@@ -63,11 +63,10 @@ impl Git {
             bail!("not inside a git repository");
         }
         let out = String::from_utf8(out.stdout)?;
-        let mut lines = out.lines();
-        let root = lines.next().context("git named no repository root")?;
+        let (root, prefix) = out.split_once('\n').context("git named no root")?;
         Ok(Git {
             root: PathBuf::from(root),
-            prefix: lines.next().unwrap_or_default().to_owned(),
+            prefix: prefix.trim_end().to_owned(),
         })
     }
 
