@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use cx_cli::git::{Git, Side, Status};
-use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::pipeline::{self, Options};
 use cx_cli::progress::Progress;
 
 fn git(dir: &Path, args: &[&str]) {
@@ -67,7 +67,8 @@ fn scores_a_realistic_branch() {
     let (_dir, git) = setup();
     let report = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -129,7 +130,7 @@ fn scores_a_realistic_branch() {
 #[test]
 fn line_churn_counts_what_git_counts() {
     let (_dir, git) = setup();
-    let report = pipeline::diff(&git, &DiffOptions::default(), Progress::default()).unwrap();
+    let report = pipeline::diff(&git, None, &Options::default(), Progress::default()).unwrap();
     assert_eq!(
         (report.totals.added_lines, report.totals.deleted_lines),
         (120, 120)
@@ -138,7 +139,8 @@ fn line_churn_counts_what_git_counts() {
     // Including the test file adds exactly its lines, no others.
     let with = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             include_tests: true,
             ..Default::default()
         },
@@ -159,7 +161,8 @@ fn excluding_tests_drops_their_cost_and_leaves_the_rest() {
     let scored = |include_tests| {
         pipeline::diff(
             &git,
-            &DiffOptions {
+            None,
+            &Options {
                 include_tests,
                 ..Default::default()
             },
@@ -251,7 +254,8 @@ fn staged_mode_scores_the_index() {
 
     let report = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Index,
             ..Default::default()
         },
@@ -270,7 +274,7 @@ fn tree_reports_absolute_complexity_with_contributions() {
     let (_dir, git) = setup();
     let report = pipeline::abs(
         &git,
-        &AbsOptions {
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -312,7 +316,8 @@ fn worktree_side_scores_the_whole_working_tree() {
 
     let report = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Worktree,
             ..Default::default()
         },
@@ -338,7 +343,8 @@ fn worktree_side_scores_the_whole_working_tree() {
     // The unstaged and untracked halves are exactly what --staged misses.
     let staged_only = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Index,
             ..Default::default()
         },
@@ -366,7 +372,7 @@ fn abs_measures_the_snapshot_it_is_asked_for() {
     let measure = |side| {
         let report = pipeline::abs(
             &repo,
-            &AbsOptions {
+            &Options {
                 side,
                 ..Default::default()
             },
@@ -446,7 +452,7 @@ fn an_unmerged_path_is_scored_once() {
     let repo = Git::discover_at(root).unwrap();
     let report = pipeline::abs(
         &repo,
-        &AbsOptions {
+        &Options {
             side: Side::Worktree,
             ..Default::default()
         },
@@ -467,7 +473,8 @@ fn untracked_lines_reach_the_churn_totals() {
     let root = dir.path();
     let committed = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -478,7 +485,8 @@ fn untracked_lines_reach_the_churn_totals() {
     fs::write(root.join("src/fresh.rs"), gen_code(77, 40)).unwrap();
     let worktree = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Worktree,
             ..Default::default()
         },
@@ -531,10 +539,11 @@ fn a_submodule_is_skipped_not_fatal() {
     git(root, &["commit", "-q", "-m", "add submodule"]);
 
     // Both scoring passes must succeed with the gitlink present...
-    let abs = pipeline::abs(&repo, &AbsOptions::default(), Progress::default()).unwrap();
+    let abs = pipeline::abs(&repo, &Options::default(), Progress::default()).unwrap();
     let diff = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -619,6 +628,11 @@ fn comments_are_stripped_unless_asked_to_score_them() {
         assert!(kept["delta_bytes"].as_f64().unwrap() > 300.0);
     }
     assert_eq!(run(Some("1"), Some("--comments=false"))["new_lines"], 120);
+    assert_eq!(
+        run(Some("0"), None)["new_lines"],
+        120,
+        "a falsy pin must not mean true"
+    );
 }
 
 /// The mirror of the add case: deleting a file's comments is also ≈ free,
@@ -762,6 +776,254 @@ fn prose_is_skipped_by_default_and_scored_on_request() {
     }
 }
 
+/// A string-contents-only change is free by default: each literal
+/// reduces to its delimiters on both sides, so only the structure
+/// counts. With --strings, novel contents cost what novel content costs.
+#[test]
+fn string_contents_are_stripped_unless_asked_to_score_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::create_dir(root.join("src")).unwrap();
+    // Sixty constants whose structure never changes: the base holds
+    // placeholder contents, the feature branch rewords them to novel
+    // text — a string-contents-only change.
+    let consts = |contents: &mut dyn Iterator<Item = &str>| -> Vec<u8> {
+        contents
+            .enumerate()
+            .map(|(i, c)| format!("const S{i}: &str = \"{c}\";\n"))
+            .collect::<String>()
+            .into_bytes()
+    };
+    let placeholders = consts(&mut std::iter::repeat_n("x", 60));
+    let text = String::from_utf8(gen_code(2, 60)).unwrap();
+    let novel = consts(&mut text.lines());
+    fs::write(root.join("src/lib.rs"), placeholders).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    fs::write(root.join("src/lib.rs"), novel).unwrap();
+    git(root, &["commit", "-q", "-am", "reword strings"]);
+
+    let run = |pinned: Option<&str>, flag: Option<&str>| -> serde_json::Value {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+        cmd.current_dir(root)
+            .args(["diff", "--json", "--committed"])
+            .args(flag)
+            .env_remove("CX_STRINGS");
+        if let Some(value) = pinned {
+            cmd.env("CX_STRINGS", value);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        report["files"][0].clone()
+    };
+
+    let stripped = run(None, None);
+    assert_eq!(stripped["path"], "src/lib.rs");
+    assert!(
+        stripped["review_bytes"].as_f64().unwrap() < 64.0,
+        "a string-contents-only change is ≈ free to review: {stripped}"
+    );
+    assert!(stripped["delta_bytes"].as_f64().unwrap().abs() < 64.0);
+
+    for kept in [run(None, Some("--strings")), run(Some("1"), None)] {
+        assert!(
+            kept["review_bytes"].as_f64().unwrap() > 300.0,
+            "novel string contents cost review attention when scored: {kept}"
+        );
+        assert!(kept["delta_bytes"].as_f64().unwrap() > 300.0);
+    }
+    // Vetoed and falsy-pinned runs strip like the default: a set
+    // variable must not mean "true" whatever its value.
+    for (pinned, flag) in [(Some("1"), Some("--strings=false")), (Some("0"), None)] {
+        assert!(run(pinned, flag)["review_bytes"].as_f64().unwrap() < 64.0);
+    }
+}
+
+/// Data files are out of the universe by default and fully scored on
+/// request, through the flag, the environment default, and the per-run
+/// veto.
+#[test]
+fn data_files_are_skipped_by_default_and_scored_on_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), gen_code(1, 40)).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    let csv: String = String::from_utf8(gen_code(31, 40))
+        .unwrap()
+        .lines()
+        .enumerate()
+        .map(|(i, l)| format!("{i},{l}\n"))
+        .collect();
+    fs::write(root.join("rows.csv"), csv).unwrap();
+    fs::write(root.join("config.json"), "{\"a\": 1, \"b\": [2, 3]}\n").unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "data"]);
+
+    let run = |pinned: Option<&str>, flag: Option<&str>| -> serde_json::Value {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+        cmd.current_dir(root)
+            .args(["diff", "--json", "--committed"])
+            .args(flag)
+            .env_remove("CX_DATA");
+        if let Some(value) = pinned {
+            cmd.env("CX_DATA", value);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let skipped_as_data = |report: &serde_json::Value, path: &str| {
+        report["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["path"] == path && s["reason"] == "data")
+    };
+    let scored = |report: &serde_json::Value, path: &str| {
+        report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == path)
+    };
+
+    // Skipped when off (default, pinned false, veto); scored when on.
+    for (pinned, flag) in [
+        (None, None),
+        (Some("0"), None),
+        (Some("1"), Some("--data=false")),
+    ] {
+        let report = run(pinned, flag);
+        for path in ["rows.csv", "config.json"] {
+            assert!(
+                skipped_as_data(&report, path),
+                "data off: {pinned:?} {flag:?} {path}"
+            );
+            assert!(!scored(&report, path));
+        }
+    }
+    for (pinned, flag) in [
+        (None, Some("--data")),
+        (Some("1"), None),
+        (Some("true"), None),
+    ] {
+        let report = run(pinned, flag);
+        assert!(
+            report["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["path"] == "rows.csv" && f["review_bytes"].as_f64().unwrap() > 200.0),
+            "data on: {pinned:?} {flag:?}"
+        );
+        assert!(scored(&report, "config.json"));
+        for path in ["rows.csv", "config.json"] {
+            assert!(!skipped_as_data(&report, path));
+        }
+    }
+
+    // The same knob reaches abs: the data file joins C(tree) only on
+    // request.
+    let abs_lists_rows = |flag: Option<&str>| -> bool {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+        cmd.current_dir(root)
+            .args(["abs", "--json"])
+            .args(flag)
+            .env_remove("CX_DATA");
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "rows.csv")
+    };
+    assert!(!abs_lists_rows(None));
+    assert!(abs_lists_rows(Some("--data")));
+}
+
+/// Common flags mean the same thing on either side of the subcommand: a
+/// flag given before `diff` must reach scoring, not silently vanish
+/// into an unread copy of the parse tree.
+#[test]
+fn flags_before_the_subcommand_are_honored() {
+    let (dir, _git) = repo_with(&[("src/lib.rs", gen_code(1, 40))]);
+    fs::write(dir.path().join("rows.csv"), gen_code(31, 40)).unwrap();
+
+    let scored_paths = |args: &[&str]| -> Vec<String> {
+        let out = Command::new(env!("CARGO_BIN_EXE_cx"))
+            .current_dir(dir.path())
+            .args(args)
+            .env_remove("CX_DATA")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut paths: Vec<String> = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_owned())
+            .collect();
+        paths.sort();
+        paths
+    };
+
+    let before = scored_paths(&["--data=true", "diff", "--json"]);
+    let after = scored_paths(&["diff", "--json", "--data=true"]);
+    assert!(after.contains(&"rows.csv".to_owned()));
+    assert_eq!(before, after, "flag position must not change the run");
+}
+
+/// --base reaches ref resolution: an explicit base equal to the default
+/// changes nothing, and one that resolves to no commit is an error.
+#[test]
+fn an_explicit_base_resolves_and_a_bogus_one_fails() {
+    let (dir, _git) = setup();
+    let run = |extra: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+        cmd.current_dir(dir.path())
+            .args(["diff", "--json", "--committed"])
+            .args(extra)
+            .env_remove("CX_BASE");
+        cmd.output().unwrap()
+    };
+    let totals =
+        |out: &[u8]| serde_json::from_slice::<serde_json::Value>(out).unwrap()["totals"].clone();
+
+    let explicit = run(&["--base", "main"]);
+    assert!(explicit.status.success());
+    assert_eq!(totals(&explicit.stdout), totals(&run(&[]).stdout));
+
+    let bogus = run(&["--base", "nope"]);
+    assert!(!bogus.status.success());
+    assert!(String::from_utf8_lossy(&bogus.stderr).contains("does not resolve"));
+}
+
 /// A one-commit repo holding exactly these files.
 fn repo_with(files: &[(&str, Vec<u8>)]) -> (tempfile::TempDir, Git) {
     let dir = tempfile::tempdir().unwrap();
@@ -800,14 +1062,14 @@ fn a_scoped_run_equals_a_repo_holding_only_that_scope() {
 
     let scoped = pipeline::abs(
         &whole,
-        &AbsOptions {
+        &Options {
             globs: vec!["alpha/**".to_owned()],
             ..Default::default()
         },
         Progress::default(),
     )
     .unwrap();
-    let unscoped = pipeline::abs(&alone, &AbsOptions::default(), Progress::default()).unwrap();
+    let unscoped = pipeline::abs(&alone, &Options::default(), Progress::default()).unwrap();
 
     let scores = |r: &pipeline::AbsReport| -> Vec<(String, u64)> {
         r.files.iter().map(|f| (f.path.clone(), f.bytes)).collect()
@@ -825,7 +1087,8 @@ fn out_of_scope_files_are_neither_scored_nor_skipped() {
     let (_dir, git) = setup();
     let report = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             globs: vec!["src/**".to_owned()],
             ..Default::default()
@@ -861,7 +1124,8 @@ fn an_excluding_glob_drops_just_its_matches() {
     let run = |globs: Vec<String>| {
         pipeline::diff(
             &git,
-            &DiffOptions {
+            None,
+            &Options {
                 side: Side::Head,
                 globs,
                 ..Default::default()
