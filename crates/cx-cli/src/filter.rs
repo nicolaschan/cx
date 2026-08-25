@@ -107,11 +107,10 @@ fn is_prose(path: &str, content: &[u8]) -> bool {
 }
 
 /// Whether a blob is serialized data rather than authored logic, by the
-/// extension after its name's last dot.
+/// extension after the path's last dot. No data extension contains `/`,
+/// so a dot inside a directory name can never match.
 fn is_data(path: &str) -> bool {
-    path.rsplit('/')
-        .next()
-        .and_then(|file| file.rsplit_once('.'))
+    path.rsplit_once('.')
         .is_some_and(|(_, ext)| DATA_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
 }
 

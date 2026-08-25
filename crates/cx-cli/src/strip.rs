@@ -382,25 +382,14 @@ mod tests {
 
     #[test]
     fn unknown_language_is_returned_untouched() {
-        let src = b"// looks like a comment\n\n".to_vec();
-        let keep = Keep::default();
-        assert_eq!(code_only("notes.unknownext", src.clone(), keep), src);
-        assert_eq!(
-            code_only("Makefile", b"# c\nall:\n".to_vec(), keep),
-            b"all:\n"
-        );
+        let src = "// looks like a comment\n\n";
+        assert_eq!(strip("notes.unknownext", src), src);
+        assert_eq!(strip("Makefile", "# c\nall:\n"), "all:\n");
     }
 
     #[test]
     fn shebang_decides_the_language_when_the_path_does_not() {
-        assert_eq!(
-            code_only(
-                "bin/run",
-                b"#!/bin/sh\n# c\necho hi\n".to_vec(),
-                Keep::default()
-            ),
-            b"echo hi\n"
-        );
+        assert_eq!(strip("bin/run", "#!/bin/sh\n# c\necho hi\n"), "echo hi\n");
     }
 
     #[test]
