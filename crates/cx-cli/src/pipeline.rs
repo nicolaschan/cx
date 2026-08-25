@@ -113,46 +113,48 @@ fn prepare(filter: &Filter, comments: bool, path: &str, raw: Vec<u8>) -> Prepare
     }
 }
 
+/// `f` over every item, spread across the cores, in the caller.s order.
+/// Order is not a convenience here: the chain rule scores a file against
+/// the ones before it, so a permutation silently changes every score.
+fn par_map<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync) -> Vec<R> {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut rest = items;
+    let per_core = rest.len().div_ceil(cores);
+    let mut lanes: Vec<Vec<T>> = Vec::new();
+    while !rest.is_empty() {
+        let tail = rest.split_off(per_core.min(rest.len()));
+        lanes.push(std::mem::replace(&mut rest, tail));
+    }
+    let f = &f;
+    std::thread::scope(|scope| {
+        lanes
+            .into_iter()
+            .map(|lane| scope.spawn(move || lane.into_iter().map(f).collect::<Vec<R>>()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|lane| lane.join().expect("prepare thread"))
+            .collect()
+    })
+}
+
 /// Every path with a blob, prepared, in the order `paths` was given.
 /// Paths whose blob is missing (a submodule, a file gone from disk) are
-/// simply absent.
-///
-/// Preparing a blob is a pure function of that blob, so the load is one
-/// parallel map: the cores split the paths between them and the results
-/// are stitched back into the caller's order.
+/// simply absent. Preparing a blob is a pure function of that blob, so
+/// the whole load is one parallel map.
 fn load<'a>(
     filter: &Filter,
     comments: bool,
     paths: &[&'a str],
     blobs: Vec<Option<Vec<u8>>>,
 ) -> Vec<(&'a str, Prepared)> {
-    let mut rest: Vec<(&'a str, Vec<u8>)> = paths
+    let present: Vec<(&'a str, Vec<u8>)> = paths
         .iter()
         .copied()
         .zip(blobs)
         .filter_map(|(path, blob)| Some((path, blob?)))
         .collect();
-    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let per_core = rest.len().div_ceil(cores).max(1);
-    let mut lanes: Vec<Vec<(&'a str, Vec<u8>)>> = Vec::new();
-    while !rest.is_empty() {
-        let tail = rest.split_off(per_core.min(rest.len()));
-        lanes.push(std::mem::replace(&mut rest, tail));
-    }
-    std::thread::scope(|scope| {
-        lanes
-            .into_iter()
-            .map(|lane| {
-                scope.spawn(move || {
-                    lane.into_iter()
-                        .map(|(path, raw)| (path, prepare(filter, comments, path, raw)))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flat_map(|lane| lane.join().expect("prepare thread"))
-            .collect()
+    par_map(present, |(path, raw)| {
+        (path, prepare(filter, comments, path, raw))
     })
 }
 
@@ -168,6 +170,18 @@ pub struct Pass<'a> {
     items: Vec<&'a [u8]>,
 }
 
+/// What a pass is conditioned on. A pass whose items are all empty scores
+/// 0 for every one of them however large its reference is, so it is
+/// conditioned on nothing and the compressor never reads the tree —
+/// `cx_core`'s `an_all_empty_pass_is_zero_whatever_its_reference` pins
+/// that the two forms agree.
+fn conditioning<'a>(pass: &'a Pass) -> &'a [&'a [u8]] {
+    match pass.items.iter().all(|item| item.is_empty()) {
+        true => &[],
+        false => &pass.reference,
+    }
+}
+
 /// Score every pass of one invocation. The passes are independent
 /// streams, so they run concurrently, and the bar spans all the bytes
 /// the invocation will compress rather than one view's share of them.
@@ -179,7 +193,7 @@ fn score<const N: usize>(
 ) -> [Vec<u64>; N] {
     let streams = passes
         .each_ref()
-        .map(|pass| scorer.attribution(&pass.reference, &pass.items));
+        .map(|pass| scorer.attribution(conditioning(pass), &pass.items));
     let bar = &progress.bar(label, streams.iter().map(Attribution::bytes).sum());
     std::thread::scope(|scope| {
         streams
@@ -230,6 +244,22 @@ pub struct AbsReport {
     pub raw_bytes: u64,
     pub compressed_bytes: u64,
     pub files: Vec<AbsFile>,
+}
+
+impl DiffOptions {
+    /// The tree view of the same run. Every field but the base says which
+    /// files exist for this invocation, and the two views must agree on
+    /// that or the merged report describes two different repositories —
+    /// so the tree view is derived here rather than built alongside.
+    pub fn tree(&self) -> AbsOptions {
+        AbsOptions {
+            include_tests: self.include_tests,
+            comments: self.comments,
+            prose: self.prose,
+            side: self.side,
+            globs: self.globs.clone(),
+        }
+    }
 }
 
 /// The status stays typed everywhere; this string form exists only at
@@ -448,12 +478,10 @@ impl DiffSources {
             .unwrap_or_default()
     }
 
-    /// A change's new side, by the same rule.
+    /// A change's new side, by the same rule. A deleted path was never
+    /// fetched, so the lookup misses and the empty file is the answer.
     fn new_side(&self, change: &Change) -> &[u8] {
-        (change.status != Status::Deleted)
-            .then(|| code(self.new_contents.get(&change.path)))
-            .flatten()
-            .unwrap_or_default()
+        code(self.new_contents.get(&change.path)).unwrap_or_default()
     }
 
     /// The universe is kept files only: a file the filter excludes exists
@@ -565,15 +593,15 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
 /// diff to finish, and the bar covers both.
 pub fn overview(
     git: &Git,
-    abs_opts: &AbsOptions,
-    diff_opts: &DiffOptions,
+    opts: &DiffOptions,
     progress: Progress,
 ) -> Result<(AbsReport, DiffReport)> {
+    let tree_opts = opts.tree();
     // Two independent trips to git and back; neither view waits on the
     // other to have its blobs.
     let (tree_sources, diff_sources) = std::thread::scope(|scope| {
-        let tree = scope.spawn(|| AbsSources::fetch(git, abs_opts));
-        let diff = DiffSources::fetch(git, diff_opts);
+        let tree = scope.spawn(|| AbsSources::fetch(git, &tree_opts));
+        let diff = DiffSources::fetch(git, opts);
         (tree.join().expect("fetch thread"), diff)
     });
     let (tree_sources, diff_sources) = (tree_sources?, diff_sources?);

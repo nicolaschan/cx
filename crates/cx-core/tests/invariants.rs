@@ -173,6 +173,20 @@ fn empty_items_are_free() {
     );
 }
 
+/// A pass whose items are all empty scores 0 for every one of them, and
+/// the reference it was conditioned on cannot change that. This is what
+/// lets a caller skip such a pass without running it: both forms are
+/// computed here, so the claim is checked against the compressor rather
+/// than asserted.
+#[test]
+fn an_all_empty_pass_is_zero_whatever_its_reference() {
+    let s = scorer();
+    let reference = gen_code(900, 100);
+    let items: [&[u8]; 3] = [&[], &[], &[]];
+    assert_eq!(s.attribution(&[&reference], &items).run(|_| {}), [0, 0, 0]);
+    assert_eq!(s.attribution(&[], &items).run(|_| {}), [0, 0, 0]);
+}
+
 /// Bytes zstd cannot compress come out whole, block headers included,
 /// however many blocks they span: the output grows to fit.
 #[test]

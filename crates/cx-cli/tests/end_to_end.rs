@@ -893,18 +893,14 @@ fn an_excluding_glob_drops_just_its_matches() {
 #[test]
 fn the_overview_reports_what_its_two_views_report_alone() {
     let (_dir, git) = setup();
-    let abs_opts = AbsOptions {
-        side: Side::Worktree,
-        ..Default::default()
-    };
     let diff_opts = DiffOptions {
         side: Side::Worktree,
         ..Default::default()
     };
+    let abs_opts = diff_opts.tree();
     let alone_tree = pipeline::abs(&git, &abs_opts, Progress::default()).unwrap();
     let alone_diff = pipeline::diff(&git, &diff_opts, Progress::default()).unwrap();
-    let (tree, diff) =
-        pipeline::overview(&git, &abs_opts, &diff_opts, Progress::default()).unwrap();
+    let (tree, diff) = pipeline::overview(&git, &diff_opts, Progress::default()).unwrap();
 
     assert_eq!(
         serde_json::to_value(&tree).unwrap(),
@@ -922,10 +918,83 @@ fn the_overview_reports_what_its_two_views_report_alone() {
     );
 }
 
-/// A run whose only change is an empty file gives every pass nothing to
-/// attribute. The file is still reported, scored zero.
+/// Blobs are prepared across the machine's cores, and the chain rule
+/// scores each file against the ones before it — so the order the caller
+/// asked for has to survive the split. Identical files make that visible:
+/// whichever one comes first in sorted-path order pays for the content,
+/// and every later copy is nearly free. A permutation anywhere in the
+/// load moves that cost onto a different file, leaving totals intact.
 #[test]
-fn an_empty_file_is_reported_and_costs_nothing() {
+fn identical_files_are_charged_to_the_first_in_path_order() {
+    let body = gen_code(11, 200);
+    let files: Vec<(String, Vec<u8>)> = ('a'..='h')
+        .map(|c| (format!("src/{c}.rs"), body.clone()))
+        .collect();
+    let borrowed: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|(path, code)| (path.as_str(), code.clone()))
+        .collect();
+    let (_dir, git) = repo_with(&borrowed);
+
+    let report = pipeline::abs(
+        &git,
+        &AbsOptions {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+
+    let mut scored: Vec<(&str, u64)> = report
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.bytes))
+        .collect();
+    scored.sort();
+    let (first, rest) = scored.split_first().expect("eight files were scored");
+    assert_eq!(first.0, "src/a.rs");
+    assert!(
+        first.1 > 100,
+        "the first copy pays for the content, got {}",
+        first.1
+    );
+    for (path, bytes) in rest {
+        assert!(
+            *bytes * 10 < first.1,
+            "{path} repeats src/a.rs and must be nearly free, got {bytes} vs {}",
+            first.1
+        );
+    }
+}
+
+/// `raw_bytes` is the corpus the snapshot holds, not a compressor
+/// statistic: it must equal the code actually scored.
+#[test]
+fn raw_bytes_is_the_size_of_the_code_that_was_scored() {
+    let files = [
+        ("src/one.rs", gen_code(21, 80)),
+        ("src/two.rs", gen_code(22, 40)),
+    ];
+    let (_dir, git) = repo_with(&files);
+    let report = pipeline::abs(
+        &git,
+        &AbsOptions {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+    let expected: u64 = files.iter().map(|(_, code)| code.len() as u64).sum();
+    assert_eq!(report.raw_bytes, expected);
+}
+
+/// An added empty file is scored, not skipped: it reaches the report with
+/// nothing to charge for. (The saving that comes with it — never reading
+/// the reference — is a scheduling property, pinned in `cx-core`.)
+#[test]
+fn an_added_empty_file_is_reported_at_zero() {
     let (dir, git) = setup();
     fs::write(dir.path().join("src/empty.rs"), "").unwrap();
     let report = pipeline::diff(
@@ -938,12 +1007,15 @@ fn an_empty_file_is_reported_and_costs_nothing() {
         Progress::default(),
     )
     .unwrap();
-    assert_eq!(report.files.len(), 1, "the scope holds one file");
-    let empty = report
-        .files
-        .iter()
-        .find(|f| f.path == "src/empty.rs")
-        .expect("the empty file is scored, not skipped");
+    let skipped: Vec<&str> = report.skipped.iter().map(|s| s.path.as_str()).collect();
+    assert!(
+        skipped.is_empty(),
+        "nothing may be skipped, got {skipped:?}"
+    );
+    let scored: Vec<&str> = report.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(scored, ["src/empty.rs"], "the scope holds one file");
+    let empty = &report.files[0];
+    assert_eq!(empty.path, "src/empty.rs");
     assert_eq!(empty.status, Status::Added);
     assert_eq!((empty.review_bytes, empty.delta_bytes), (0, 0));
 }
