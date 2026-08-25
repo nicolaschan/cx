@@ -81,22 +81,22 @@ const PROSE_FILENAMES: [&str; 8] = [
     "CONTRIBUTORS",
 ];
 
-/// Serialized-data languages among those tokei recognises. Config
-/// (YAML, TOML) and markup (HTML, CSS) stay code — they are authored,
-/// not emitted — as does a language that merely compiles *to* data
-/// (Jsonnet). SVG is an image that happens to be text.
-const DATA_LANGUAGES: [LanguageType; 3] =
-    [LanguageType::Json, LanguageType::Svg, LanguageType::Xml];
-
-/// Data formats tokei has no language for, matched by extension when no
-/// language is found.
-const DATA_EXTENSIONS: [&str; 5] = ["csv", "tsv", "jsonl", "ndjson", "geojson"];
+/// Data formats, by extension — the sole route to them: tokei's
+/// serialized-data languages (JSON, XML, SVG) have no filename or
+/// shebang entries, and the tabular and line-delimited formats have no
+/// tokei language at all. Config (YAML, TOML) and markup (HTML, CSS)
+/// stay code — they are authored, not emitted — as does a language that
+/// merely compiles *to* data (Jsonnet). SVG is an image that happens to
+/// be text.
+const DATA_EXTENSIONS: [&str; 8] = [
+    "json", "xml", "svg", "csv", "tsv", "jsonl", "ndjson", "geojson",
+];
 
 /// Whether a blob is a prose document: a prose language by tokei's
 /// table, or — only when no language is found at all, so `LICENSE.py`
 /// is Python — a conventional extensionless document.
-fn is_prose(path: &str, lang: Option<LanguageType>) -> bool {
-    match lang {
+fn is_prose(path: &str, content: &[u8]) -> bool {
+    match language::of(path, content) {
         Some(lang) => PROSE_LANGUAGES.contains(&lang),
         None => {
             let file = path.rsplit('/').next().unwrap_or(path);
@@ -106,18 +106,13 @@ fn is_prose(path: &str, lang: Option<LanguageType>) -> bool {
     }
 }
 
-/// Whether a blob is serialized data rather than authored logic: a data
-/// language by tokei's table, or — when no language is found — a data
-/// format tokei doesn't know, by extension.
-fn is_data(path: &str, lang: Option<LanguageType>) -> bool {
-    match lang {
-        Some(lang) => DATA_LANGUAGES.contains(&lang),
-        None => path
-            .rsplit('/')
-            .next()
-            .and_then(|file| file.rsplit_once('.'))
-            .is_some_and(|(_, ext)| DATA_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e))),
-    }
+/// Whether a blob is serialized data rather than authored logic, by the
+/// extension after its name's last dot.
+fn is_data(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .and_then(|file| file.rsplit_once('.'))
+        .is_some_and(|(_, ext)| DATA_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
 }
 
 /// Whether a path names a test, by convention alone — no language, build
@@ -203,11 +198,10 @@ impl Filter {
         if self.patterns.is_match(path) {
             return Some("generated/vendored pattern");
         }
-        let lang = language::of(path, content);
-        if !self.prose && is_prose(path, lang) {
+        if !self.prose && is_prose(path, content) {
             return Some("prose");
         }
-        if !self.data && is_data(path, lang) {
+        if !self.data && is_data(path) {
             return Some("data");
         }
         if !self.include_tests && is_test_path(path) {

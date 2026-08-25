@@ -157,37 +157,26 @@ impl Syntax {
         let mut i = 0;
         while i < src.len() {
             let rest = &src[i..];
-            match state {
+            let (len, kept) = match state {
                 State::Code => match self.opener_at(rest, out.statement_start) {
                     // A string's delimiter is code, so it's always kept;
                     // a comment's belongs to the comment.
                     Some((len, entered)) => {
-                        if matches!(entered, State::Str { .. }) || keep.comments {
-                            out.push(&rest[..len]);
-                        }
                         state = entered;
-                        i += len;
+                        (len, matches!(entered, State::Str { .. }) || keep.comments)
                     }
-                    None => {
-                        out.push(&rest[..1]);
-                        i += 1;
-                    }
+                    None => (1, true),
                 },
                 State::Line => {
                     if rest[0] == b'\n' {
-                        out.push(b"\n");
                         state = State::Code;
-                    } else if keep.comments {
-                        out.push(&rest[..1]);
+                        (1, true)
+                    } else {
+                        (1, keep.comments)
                     }
-                    i += 1;
                 }
                 State::Block { open, close, depth } => {
                     if rest.starts_with(close.as_bytes()) {
-                        if keep.comments {
-                            out.push(close.as_bytes());
-                        }
-                        i += close.len();
                         state = if depth == 1 {
                             State::Code
                         } else {
@@ -197,42 +186,33 @@ impl Syntax {
                                 depth: depth - 1,
                             }
                         };
+                        (close.len(), keep.comments)
                     } else if let Some(open) = open.filter(|o| rest.starts_with(o.as_bytes())) {
-                        if keep.comments {
-                            out.push(open.as_bytes());
-                        }
-                        i += open.len();
                         state = State::Block {
                             open: Some(open),
                             close,
                             depth: depth + 1,
                         };
+                        (open.len(), keep.comments)
                     } else {
-                        if rest[0] == b'\n' || keep.comments {
-                            out.push(&rest[..1]);
-                        }
-                        i += 1;
+                        (1, rest[0] == b'\n' || keep.comments)
                     }
                 }
                 State::Str { close, verbatim } => {
                     if !verbatim && rest[0] == b'\\' {
-                        let n = rest.len().min(2);
-                        if keep.strings {
-                            out.push(&rest[..n]);
-                        }
-                        i += n;
+                        (rest.len().min(2), keep.strings)
                     } else if rest.starts_with(close.as_bytes()) {
-                        out.push(close.as_bytes());
                         state = State::Code;
-                        i += close.len();
+                        (close.len(), true)
                     } else {
-                        if keep.strings {
-                            out.push(&rest[..1]);
-                        }
-                        i += 1;
+                        (1, keep.strings)
                     }
                 }
+            };
+            if kept {
+                out.push(&rest[..len]);
             }
+            i += len;
         }
         without_blank_lines(&out.bytes)
     }
