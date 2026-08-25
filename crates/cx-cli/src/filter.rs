@@ -424,24 +424,25 @@ mod tests {
             "map.geojson",
             "pom.xml",
             "logo.svg",
+            // The extension is case-insensitive and must be the file's
+            // own: a dot inside a directory name never matches, because
+            // no data extension contains a slash.
+            "export/ROWS.CSV",
+            "dir.v1/rows.csv",
         ] {
             assert_eq!(f.exclusion(path, b"data"), Some("data"), "{path}");
         }
-        // The extension is case-insensitive and must be the file's own:
-        // a dot inside a directory name never matches, because no data
-        // extension contains a slash.
-        assert_eq!(f.exclusion("export/ROWS.CSV", b"data"), Some("data"));
-        assert_eq!(f.exclusion("dir.v1/rows.csv", b"data"), Some("data"));
-        assert_eq!(f.exclusion("data.json/notes.rs", b"code"), None);
-        assert_eq!(f.exclusion("data.json/Makefile", b"code"), None);
-        // Config and markup stay code, and so does a language that
-        // merely compiles *to* data.
+        // Config and markup stay code, so does a language that merely
+        // compiles *to* data, and so does a file under a directory whose
+        // name ends in a data extension.
         for path in [
             "ci.yaml",
             "Cargo.toml",
             "index.html",
             "style.css",
             "conf.jsonnet",
+            "data.json/notes.rs",
+            "data.json/Makefile",
         ] {
             assert_eq!(f.exclusion(path, b"code"), None, "{path}");
         }
