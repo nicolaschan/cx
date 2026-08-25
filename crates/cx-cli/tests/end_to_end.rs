@@ -910,6 +910,7 @@ fn a_run_inside_a_subdirectory_equals_a_repo_holding_only_that_subtree() {
     };
     assert_eq!(scores(&from_inside), scores(&whole_repo));
     assert_eq!(from_inside.compressed_bytes, whole_repo.compressed_bytes);
+    assert_eq!(from_inside.file_count, 2, "alpha's two files, and no more");
 }
 
 /// The same, through the binary: the process's directory is the run's
