@@ -9,7 +9,8 @@ use std::process::Command;
 use cx_cli::git::{Git, Side, Status};
 use cx_cli::pipeline::{self, Options};
 use cx_cli::progress::Progress;
-use cx_cli::report::{Options, render_diff, render_overview};
+use cx_cli::report::{self, render_diff, render_overview};
+use cx_cli::strip::{self, Keep};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -1152,6 +1153,151 @@ fn an_excluding_glob_drops_just_its_matches() {
     assert_eq!(paths(&without), expected);
 }
 
+/// The overview scores both views in one batch. Whatever it reports must
+/// be exactly what running each view on its own reports — the merge is a
+/// scheduling change, not a scoring one.
+#[test]
+fn the_overview_reports_what_its_two_views_report_alone() {
+    let (_dir, git) = setup();
+    let opts = Options {
+        side: Side::Worktree,
+        ..Default::default()
+    };
+    let alone_tree = pipeline::abs(&git, &opts, Progress::default()).unwrap();
+    let alone_diff = pipeline::diff(&git, None, &opts, Progress::default()).unwrap();
+    let (tree, diff) = pipeline::overview(&git, None, &opts, Progress::default()).unwrap();
+
+    assert_eq!(
+        serde_json::to_value(&tree).unwrap(),
+        serde_json::to_value(&alone_tree).unwrap(),
+        "C(tree) must not depend on what else the invocation scores"
+    );
+    assert_eq!(
+        serde_json::to_value(&diff).unwrap(),
+        serde_json::to_value(&alone_diff).unwrap(),
+        "the diff must not depend on what else the invocation scores"
+    );
+    assert!(
+        tree.compressed_bytes > 0 && !diff.files.is_empty(),
+        "the fixture must give both views something to score"
+    );
+}
+
+/// Blobs are prepared across the machine's cores, and the chain rule
+/// scores each file against the ones before it — so the order the caller
+/// asked for has to survive the split. Identical files make that visible:
+/// whichever one comes first in sorted-path order pays for the content,
+/// and every later copy is nearly free. A permutation anywhere in the
+/// load moves that cost onto a different file, leaving totals intact.
+#[test]
+fn identical_files_are_charged_to_the_first_in_path_order() {
+    let body = gen_code(11, 200);
+    let files: Vec<(String, Vec<u8>)> = ('a'..='h')
+        .map(|c| (format!("src/{c}.rs"), body.clone()))
+        .collect();
+    let borrowed: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|(path, code)| (path.as_str(), code.clone()))
+        .collect();
+    let (_dir, git) = repo_with(&borrowed);
+
+    let report = pipeline::abs(
+        &git,
+        &Options {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+
+    let mut scored: Vec<(&str, u64)> = report
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.bytes))
+        .collect();
+    scored.sort();
+    let (first, rest) = scored.split_first().expect("eight files were scored");
+    assert_eq!(first.0, "src/a.rs");
+    assert!(
+        first.1 > 100,
+        "the first copy pays for the content, got {}",
+        first.1
+    );
+    for (path, bytes) in rest {
+        assert!(
+            *bytes * 10 < first.1,
+            "{path} repeats src/a.rs and must be nearly free, got {bytes} vs {}",
+            first.1
+        );
+    }
+}
+
+/// `raw_bytes` is the corpus the snapshot holds, not a compressor
+/// statistic: it must equal the code actually scored — the stripped
+/// bytes, which is why one fixture file is mostly comment and string.
+#[test]
+fn raw_bytes_is_the_size_of_the_code_that_was_scored() {
+    let mut padded = gen_code(21, 80);
+    padded.extend_from_slice(
+        b"// a long comment that is not code and must not be counted\n\
+          fn talk() -> &'static str { \"nor these string contents\" }\n",
+    );
+    let files = [("src/one.rs", padded), ("src/two.rs", gen_code(22, 40))];
+    let (_dir, git) = repo_with(&files);
+    let report = pipeline::abs(
+        &git,
+        &Options {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+
+    let raw: u64 = files.iter().map(|(_, code)| code.len() as u64).sum();
+    let scored: u64 = files
+        .iter()
+        .map(|(path, code)| strip::code_only(path, code.clone(), Keep::default()).len() as u64)
+        .sum();
+    assert!(
+        scored < raw,
+        "the fixture must give stripping something to do"
+    );
+    assert_eq!(report.raw_bytes, scored);
+}
+
+/// An added empty file is scored, not skipped: it reaches the report with
+/// nothing to charge for. (The saving that comes with it — never reading
+/// the reference — is a scheduling property, pinned in `cx-core`.)
+#[test]
+fn an_added_empty_file_is_reported_at_zero() {
+    let (dir, git) = setup();
+    fs::write(dir.path().join("src/empty.rs"), "").unwrap();
+    let report = pipeline::diff(
+        &git,
+        None,
+        &Options {
+            side: Side::Worktree,
+            globs: vec!["src/empty.rs".to_owned()],
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+    let skipped: Vec<&str> = report.skipped.iter().map(|s| s.path.as_str()).collect();
+    assert!(
+        skipped.is_empty(),
+        "nothing may be skipped, got {skipped:?}"
+    );
+    let scored: Vec<&str> = report.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(scored, ["src/empty.rs"], "the scope holds one file");
+    let empty = &report.files[0];
+    assert_eq!(empty.path, "src/empty.rs");
+    assert_eq!(empty.status, Status::Added);
+    assert_eq!((empty.review_bytes, empty.delta_bytes), (0, 0));
+}
+
 /// The diff view's LINES column reports net churn, signed: a deleted
 /// file reads −, an added one +. The overview's column, measuring the
 /// tree rather than the change, stays an absolute count.
@@ -1159,21 +1305,17 @@ fn an_excluding_glob_drops_just_its_matches() {
 fn diff_lines_column_reports_signed_net_churn() {
     let (_dir, git) = setup();
     let opts = Options {
+        side: Side::Head,
+        ..Default::default()
+    };
+    let rendering = report::Options {
         top: 30,
         files: true,
         verbose: false,
         color: false,
     };
-    let diff = pipeline::diff(
-        &git,
-        &DiffOptions {
-            side: Side::Head,
-            ..Default::default()
-        },
-        Progress::default(),
-    )
-    .unwrap();
-    let rendered = render_diff(&diff, opts);
+    let diff = pipeline::diff(&git, None, &opts, Progress::default()).unwrap();
+    let rendered = render_diff(&diff, rendering);
     let row = |name| {
         rendered
             .lines()
@@ -1184,16 +1326,8 @@ fn diff_lines_column_reports_signed_net_churn() {
     assert!(row("novel.rs").contains("+120"), "{}", row("novel.rs"));
     assert!(row("gone.rs").contains("−120"), "{}", row("gone.rs"));
 
-    let abs = pipeline::abs(
-        &git,
-        &AbsOptions {
-            side: Side::Head,
-            ..Default::default()
-        },
-        Progress::default(),
-    )
-    .unwrap();
-    let overview = render_overview(&abs, &diff, opts);
+    let abs = pipeline::abs(&git, &opts, Progress::default()).unwrap();
+    let overview = render_overview(&abs, &diff, rendering);
     let novel = overview
         .lines()
         .find(|l| l.contains("novel.rs"))
@@ -1202,4 +1336,54 @@ fn diff_lines_column_reports_signed_net_churn() {
         novel.contains("120") && !novel.contains("+120"),
         "absolute, not a delta: {novel}"
     );
+}
+
+/// The default view is the whole invocation, run through the binary: no
+/// subcommand, both halves, and the base it was given reaching the diff
+/// half. The base here is not the one cx would have picked, so a run
+/// that dropped it on the way to either fetch would answer differently.
+#[test]
+fn the_default_view_scores_both_halves_against_the_base_it_was_given() {
+    let (dir, _git) = setup();
+    // A second commit on the branch, so HEAD~1 is a base the default
+    // resolution (main) would never land on.
+    fs::write(dir.path().join("src/later.rs"), gen_code(55, 120)).unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "later"]);
+
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_cx"))
+            .current_dir(dir.path())
+            .args(args)
+            .env_remove("CX_BASE")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "cx {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+
+    let overview = run(&["--json", "--committed", "--base", "HEAD~1"]);
+    assert_eq!(
+        overview["diff"],
+        run(&["diff", "--json", "--committed", "--base", "HEAD~1"])
+    );
+    assert_eq!(overview["abs"], run(&["abs", "--json", "--committed"]));
+
+    // The base is load-bearing: against main the diff holds the whole
+    // branch, against HEAD~1 only the last commit.
+    let default_base = run(&["diff", "--json", "--committed"]);
+    assert_eq!(
+        overview["diff"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["src/later.rs"]
+    );
+    assert_ne!(overview["diff"]["files"], default_base["files"]);
 }

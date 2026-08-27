@@ -211,9 +211,7 @@ fn main() -> Result<()> {
     let base = cli.diff.base.as_deref();
     match cli.cmd {
         None => {
-            let opts = common.options();
-            let abs = pipeline::abs(&git, &opts, progress)?;
-            let diff = pipeline::diff(&git, base, &opts, progress)?;
+            let (abs, diff) = pipeline::overview(&git, base, &common.options(), progress)?;
             emit(
                 common.json,
                 &serde_json::json!({ "abs": abs, "diff": diff }),
