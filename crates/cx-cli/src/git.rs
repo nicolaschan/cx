@@ -28,6 +28,21 @@ pub struct Change {
     pub status: Status,
 }
 
+/// Which paths a listing covers: every one of them (`None`), or only
+/// these — `Some(&[])` being a limit no path meets, and so a listing
+/// with nothing to report.
+pub type Pathspec<'a> = Option<&'a [&'a str]>;
+
+/// The trailing `-- <path>…` that holds a command to its pathspec, or
+/// None when the pathspec names nothing and there is nothing to ask.
+fn limit<'a>(paths: Pathspec<'a>) -> Option<Vec<&'a str>> {
+    match paths {
+        None => Some(Vec::new()),
+        Some([]) => None,
+        Some(paths) => Some(std::iter::once("--").chain(paths.iter().copied()).collect()),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Side {
     Head,
@@ -84,6 +99,9 @@ impl Git {
     fn run(&self, args: &[&str]) -> Result<Vec<u8>> {
         let out = Command::new("git")
             .current_dir(&self.root)
+            // Every path cx hands git came from git: a name, never a
+            // pattern, whatever characters happen to be in it.
+            .arg("--literal-pathspecs")
             .args(args)
             .output()
             .with_context(|| format!("running git {}", args.join(" ")))?;
@@ -126,27 +144,43 @@ impl Git {
         Ok(split_nul(&out))
     }
 
-    /// Shared so both listings below describe the same diff, renames
-    /// included.
+    /// Every file path a side holds: the tree, the index, or the
+    /// working tree with what git is not tracking yet.
     pub fn list(&self, side: Side) -> Result<Vec<String>> {
         if side == Side::Head {
             return self.ls_tree("HEAD");
         }
         let mut paths = split_nul(&self.run(&["ls-files", "-z", "--cached"])?);
         if side == Side::Worktree {
-            paths.extend(self.untracked()?);
+            paths.extend(self.untracked(None)?);
         }
         paths.sort();
         paths.dedup();
         Ok(paths)
     }
 
-    fn untracked(&self) -> Result<Vec<String>> {
-        let out = self.run(&["ls-files", "-z", "--others", "--exclude-standard"])?;
-        Ok(split_nul(&out))
+    fn untracked(&self, paths: Pathspec<'_>) -> Result<Vec<String>> {
+        let mut args = vec!["ls-files", "-z", "--others", "--exclude-standard"];
+        let Some(pathspec) = limit(paths) else {
+            return Ok(Vec::new());
+        };
+        args.extend(pathspec);
+        Ok(split_nul(&self.run(&args)?))
     }
 
-    fn diff(&self, format: &str, from: &str, side: Side) -> Result<Vec<String>> {
+    /// Shared so both listings below describe the same diff, renames
+    /// included — the same `paths` included, which is what decides
+    /// whether a rename is one: git pairs a rename only when both its
+    /// paths are in the diff it is asked about, so a listing limited to
+    /// part of a repository reads a rename crossing that limit as the
+    /// add or the delete that remains inside it.
+    fn diff(
+        &self,
+        format: &str,
+        from: &str,
+        side: Side,
+        paths: Pathspec<'_>,
+    ) -> Result<Vec<String>> {
         let mut args = vec!["diff", format, "-z", "--find-renames"];
         if side == Side::Index {
             args.push("--cached");
@@ -155,12 +189,16 @@ impl Git {
         if side == Side::Head {
             args.push("HEAD");
         }
+        let Some(pathspec) = limit(paths) else {
+            return Ok(Vec::new());
+        };
+        args.extend(pathspec);
         Ok(split_nul(&self.run(&args)?))
     }
 
     /// Changed files between `from` and `side`.
-    pub fn changes(&self, from: &str, side: Side) -> Result<Vec<Change>> {
-        let fields = self.diff("--name-status", from, side)?;
+    pub fn changes(&self, from: &str, side: Side, paths: Pathspec<'_>) -> Result<Vec<Change>> {
+        let fields = self.diff("--name-status", from, side, paths)?;
         let mut changes = Vec::new();
         let mut it = fields.into_iter();
         while let Some(status) = it.next() {
@@ -199,7 +237,7 @@ impl Git {
         }
         if side == Side::Worktree {
             let seen: HashSet<String> = changes.iter().map(|c| c.path.clone()).collect();
-            for path in self.untracked()? {
+            for path in self.untracked(paths)? {
                 if !seen.contains(&path) {
                     changes.push(Change {
                         path,
@@ -211,12 +249,18 @@ impl Git {
         Ok(changes)
     }
 
-    /// Lines (added, deleted) per path, keyed as [`Git::changes`] keys them.
-    pub fn line_counts(&self, from: &str, side: Side) -> Result<HashMap<String, (u64, u64)>> {
+    /// Lines (added, deleted) per path, keyed as [`Git::changes`] keys
+    /// them when asked about the same paths.
+    pub fn line_counts(
+        &self,
+        from: &str,
+        side: Side,
+        paths: Pathspec<'_>,
+    ) -> Result<HashMap<String, (u64, u64)>> {
         // `-` for a binary file, which the filter drops before summing.
         let count = |s: &str| s.parse().unwrap_or(0);
         let mut counts = HashMap::new();
-        let mut fields = self.diff("--numstat", from, side)?.into_iter();
+        let mut fields = self.diff("--numstat", from, side, paths)?.into_iter();
         while let Some(record) = fields.next() {
             let (added, rest) = record.split_once('\t').context("numstat without a tab")?;
             let (deleted, path) = rest.split_once('\t').context("numstat without a path")?;
@@ -231,7 +275,7 @@ impl Git {
         }
         if side == Side::Worktree {
             // numstat has no row for a file git is not tracking yet.
-            for path in self.untracked()? {
+            for path in self.untracked(paths)? {
                 let added = std::fs::read(self.root.join(&path))
                     .map(|c| c.iter().filter(|&&b| b == b'\n').count() as u64)
                     .unwrap_or(0);

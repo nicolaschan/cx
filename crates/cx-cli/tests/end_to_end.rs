@@ -7,8 +7,9 @@ use std::path::Path;
 use std::process::Command;
 
 use cx_cli::git::{Git, Side, Status};
-use cx_cli::pipeline::{self, AbsOptions, DiffOptions};
+use cx_cli::pipeline::{self, Options};
 use cx_cli::progress::Progress;
+use cx_cli::report::{self, render_diff, render_overview};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -24,6 +25,21 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 use cx_core::testgen::code as gen_code;
+
+/// The binary, run in `cwd` with every `CX_*` variable cleared from its
+/// environment: what a run reports is decided by its arguments, never by
+/// what the shell around it happens to pin. A case about a variable sets
+/// that one back on the command it returns.
+fn cx(cwd: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
+    cmd.current_dir(cwd);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("CX_") {
+            cmd.env_remove(name);
+        }
+    }
+    cmd
+}
 
 fn setup() -> (tempfile::TempDir, Git) {
     let dir = tempfile::tempdir().unwrap();
@@ -67,7 +83,8 @@ fn scores_a_realistic_branch() {
     let (_dir, git) = setup();
     let report = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -129,7 +146,7 @@ fn scores_a_realistic_branch() {
 #[test]
 fn line_churn_counts_what_git_counts() {
     let (_dir, git) = setup();
-    let report = pipeline::diff(&git, &DiffOptions::default(), Progress::default()).unwrap();
+    let report = pipeline::diff(&git, None, &Options::default(), Progress::default()).unwrap();
     assert_eq!(
         (report.totals.added_lines, report.totals.deleted_lines),
         (120, 120)
@@ -138,7 +155,8 @@ fn line_churn_counts_what_git_counts() {
     // Including the test file adds exactly its lines, no others.
     let with = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             include_tests: true,
             ..Default::default()
         },
@@ -159,7 +177,8 @@ fn excluding_tests_drops_their_cost_and_leaves_the_rest() {
     let scored = |include_tests| {
         pipeline::diff(
             &git,
-            &DiffOptions {
+            None,
+            &Options {
                 include_tests,
                 ..Default::default()
             },
@@ -212,15 +231,11 @@ fn include_tests_can_be_pinned_through_the_environment() {
         (Some("1"), Some("--include-tests=false"), true),
         (None, Some("--include-tests"), false),
     ] {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
-        cmd.current_dir(dir.path())
-            .args(["diff", "--json"])
-            .args(flag);
-        match pinned {
-            Some(value) => cmd.env("CX_INCLUDE_TESTS", value),
-            // An inherited setting must not decide this test's outcome.
-            None => cmd.env_remove("CX_INCLUDE_TESTS"),
-        };
+        let mut cmd = cx(dir.path());
+        cmd.args(["diff", "--json"]).args(flag);
+        if let Some(value) = pinned {
+            cmd.env("CX_INCLUDE_TESTS", value);
+        }
         let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
@@ -251,7 +266,8 @@ fn staged_mode_scores_the_index() {
 
     let report = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Index,
             ..Default::default()
         },
@@ -270,7 +286,7 @@ fn tree_reports_absolute_complexity_with_contributions() {
     let (_dir, git) = setup();
     let report = pipeline::abs(
         &git,
-        &AbsOptions {
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -312,7 +328,8 @@ fn worktree_side_scores_the_whole_working_tree() {
 
     let report = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Worktree,
             ..Default::default()
         },
@@ -338,7 +355,8 @@ fn worktree_side_scores_the_whole_working_tree() {
     // The unstaged and untracked halves are exactly what --staged misses.
     let staged_only = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Index,
             ..Default::default()
         },
@@ -366,7 +384,7 @@ fn abs_measures_the_snapshot_it_is_asked_for() {
     let measure = |side| {
         let report = pipeline::abs(
             &repo,
-            &AbsOptions {
+            &Options {
                 side,
                 ..Default::default()
             },
@@ -446,7 +464,7 @@ fn an_unmerged_path_is_scored_once() {
     let repo = Git::discover_at(root).unwrap();
     let report = pipeline::abs(
         &repo,
-        &AbsOptions {
+        &Options {
             side: Side::Worktree,
             ..Default::default()
         },
@@ -467,7 +485,8 @@ fn untracked_lines_reach_the_churn_totals() {
     let root = dir.path();
     let committed = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -478,7 +497,8 @@ fn untracked_lines_reach_the_churn_totals() {
     fs::write(root.join("src/fresh.rs"), gen_code(77, 40)).unwrap();
     let worktree = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Worktree,
             ..Default::default()
         },
@@ -531,10 +551,11 @@ fn a_submodule_is_skipped_not_fatal() {
     git(root, &["commit", "-q", "-m", "add submodule"]);
 
     // Both scoring passes must succeed with the gitlink present...
-    let abs = pipeline::abs(&repo, &AbsOptions::default(), Progress::default()).unwrap();
+    let abs = pipeline::abs(&repo, &Options::default(), Progress::default()).unwrap();
     let diff = pipeline::diff(
         &repo,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -580,11 +601,8 @@ fn comments_are_stripped_unless_asked_to_score_them() {
     git(root, &["commit", "-q", "-am", "comments"]);
 
     let run = |pinned: Option<&str>, flag: Option<&str>| -> serde_json::Value {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
-        cmd.current_dir(root)
-            .args(["diff", "--json", "--committed"])
-            .args(flag)
-            .env_remove("CX_COMMENTS");
+        let mut cmd = cx(root);
+        cmd.args(["diff", "--json", "--committed"]).args(flag);
         if let Some(value) = pinned {
             cmd.env("CX_COMMENTS", value);
         }
@@ -619,6 +637,11 @@ fn comments_are_stripped_unless_asked_to_score_them() {
         assert!(kept["delta_bytes"].as_f64().unwrap() > 300.0);
     }
     assert_eq!(run(Some("1"), Some("--comments=false"))["new_lines"], 120);
+    assert_eq!(
+        run(Some("0"), None)["new_lines"],
+        120,
+        "a falsy pin must not mean true"
+    );
 }
 
 /// The mirror of the add case: deleting a file's comments is also ≈ free,
@@ -657,11 +680,9 @@ fn deleting_comments_is_free_because_every_side_is_stripped() {
     git(root, &["commit", "-q", "-am", "drop comments"]);
 
     let file = |flag: Option<&str>| -> serde_json::Value {
-        let out = Command::new(env!("CARGO_BIN_EXE_cx"))
-            .current_dir(root)
+        let out = cx(root)
             .args(["diff", "--json", "--committed"])
             .args(flag)
-            .env_remove("CX_COMMENTS")
             .output()
             .unwrap();
         assert!(
@@ -710,11 +731,8 @@ fn prose_is_skipped_by_default_and_scored_on_request() {
     git(root, &["commit", "-q", "-am", "docs"]);
 
     let run = |pinned: Option<&str>, flag: Option<&str>| -> serde_json::Value {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cx"));
-        cmd.current_dir(root)
-            .args(["diff", "--json", "--committed"])
-            .args(flag)
-            .env_remove("CX_PROSE");
+        let mut cmd = cx(root);
+        cmd.args(["diff", "--json", "--committed"]).args(flag);
         if let Some(value) = pinned {
             cmd.env("CX_PROSE", value);
         }
@@ -762,6 +780,237 @@ fn prose_is_skipped_by_default_and_scored_on_request() {
     }
 }
 
+/// A string-contents-only change is free by default: each literal
+/// reduces to its delimiters on both sides, so only the structure
+/// counts. With --strings, novel contents cost what novel content costs.
+#[test]
+fn string_contents_are_stripped_unless_asked_to_score_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::create_dir(root.join("src")).unwrap();
+    // Sixty constants whose structure never changes: the base holds
+    // placeholder contents, the feature branch rewords them to novel
+    // text — a string-contents-only change.
+    let consts = |contents: &mut dyn Iterator<Item = &str>| -> Vec<u8> {
+        contents
+            .enumerate()
+            .map(|(i, c)| format!("const S{i}: &str = \"{c}\";\n"))
+            .collect::<String>()
+            .into_bytes()
+    };
+    let placeholders = consts(&mut std::iter::repeat_n("x", 60));
+    let text = String::from_utf8(gen_code(2, 60)).unwrap();
+    let novel = consts(&mut text.lines());
+    fs::write(root.join("src/lib.rs"), placeholders).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    fs::write(root.join("src/lib.rs"), novel).unwrap();
+    git(root, &["commit", "-q", "-am", "reword strings"]);
+
+    let run = |pinned: Option<&str>, flag: Option<&str>| -> serde_json::Value {
+        let mut cmd = cx(root);
+        cmd.args(["diff", "--json", "--committed"]).args(flag);
+        if let Some(value) = pinned {
+            cmd.env("CX_STRINGS", value);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        report["files"][0].clone()
+    };
+
+    let stripped = run(None, None);
+    assert_eq!(stripped["path"], "src/lib.rs");
+    assert!(
+        stripped["review_bytes"].as_f64().unwrap() < 64.0,
+        "a string-contents-only change is ≈ free to review: {stripped}"
+    );
+    assert!(stripped["delta_bytes"].as_f64().unwrap().abs() < 64.0);
+
+    for kept in [run(None, Some("--strings")), run(Some("1"), None)] {
+        assert!(
+            kept["review_bytes"].as_f64().unwrap() > 300.0,
+            "novel string contents cost review attention when scored: {kept}"
+        );
+        assert!(kept["delta_bytes"].as_f64().unwrap() > 300.0);
+    }
+    // Vetoed and falsy-pinned runs strip like the default: a set
+    // variable must not mean "true" whatever its value.
+    for (pinned, flag) in [(Some("1"), Some("--strings=false")), (Some("0"), None)] {
+        assert!(run(pinned, flag)["review_bytes"].as_f64().unwrap() < 64.0);
+    }
+}
+
+/// Data files are out of the universe by default and fully scored on
+/// request, through the flag, the environment default, and the per-run
+/// veto.
+#[test]
+fn data_files_are_skipped_by_default_and_scored_on_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), gen_code(1, 40)).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    let csv: String = String::from_utf8(gen_code(31, 40))
+        .unwrap()
+        .lines()
+        .enumerate()
+        .map(|(i, l)| format!("{i},{l}\n"))
+        .collect();
+    fs::write(root.join("rows.csv"), csv).unwrap();
+    fs::write(root.join("config.json"), "{\"a\": 1, \"b\": [2, 3]}\n").unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "data"]);
+
+    let run = |pinned: Option<&str>, flag: Option<&str>| -> serde_json::Value {
+        let mut cmd = cx(root);
+        cmd.args(["diff", "--json", "--committed"]).args(flag);
+        if let Some(value) = pinned {
+            cmd.env("CX_DATA", value);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let skipped_as_data = |report: &serde_json::Value, path: &str| {
+        report["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["path"] == path && s["reason"] == "data")
+    };
+    let scored = |report: &serde_json::Value, path: &str| {
+        report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == path)
+    };
+
+    // Skipped when off (default, pinned false, veto); scored when on.
+    for (pinned, flag) in [
+        (None, None),
+        (Some("0"), None),
+        (Some("1"), Some("--data=false")),
+    ] {
+        let report = run(pinned, flag);
+        for path in ["rows.csv", "config.json"] {
+            assert!(
+                skipped_as_data(&report, path),
+                "data off: {pinned:?} {flag:?} {path}"
+            );
+            assert!(!scored(&report, path));
+        }
+    }
+    for (pinned, flag) in [
+        (None, Some("--data")),
+        (Some("1"), None),
+        (Some("true"), None),
+    ] {
+        let report = run(pinned, flag);
+        assert!(
+            report["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["path"] == "rows.csv" && f["review_bytes"].as_f64().unwrap() > 200.0),
+            "data on: {pinned:?} {flag:?}"
+        );
+        assert!(scored(&report, "config.json"));
+        for path in ["rows.csv", "config.json"] {
+            assert!(!skipped_as_data(&report, path));
+        }
+    }
+
+    // The same knob reaches abs: the data file joins C(tree) only on
+    // request.
+    let abs_lists_rows = |flag: Option<&str>| -> bool {
+        let mut cmd = cx(root);
+        cmd.args(["abs", "--json"]).args(flag);
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "rows.csv")
+    };
+    assert!(!abs_lists_rows(None));
+    assert!(abs_lists_rows(Some("--data")));
+}
+
+/// Common flags mean the same thing on either side of the subcommand: a
+/// flag given before `diff` must reach scoring, not silently vanish
+/// into an unread copy of the parse tree.
+#[test]
+fn flags_before_the_subcommand_are_honored() {
+    let (dir, _git) = repo_with(&[("src/lib.rs", gen_code(1, 40))]);
+    fs::write(dir.path().join("rows.csv"), gen_code(31, 40)).unwrap();
+
+    let scored_paths = |args: &[&str]| -> Vec<String> {
+        let out = cx(dir.path()).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut paths: Vec<String> = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_owned())
+            .collect();
+        paths.sort();
+        paths
+    };
+
+    let before = scored_paths(&["--data=true", "diff", "--json"]);
+    let after = scored_paths(&["diff", "--json", "--data=true"]);
+    assert!(after.contains(&"rows.csv".to_owned()));
+    assert_eq!(before, after, "flag position must not change the run");
+}
+
+/// --base reaches ref resolution: an explicit base equal to the default
+/// changes nothing, and one that resolves to no commit is an error.
+#[test]
+fn an_explicit_base_resolves_and_a_bogus_one_fails() {
+    let (dir, _git) = setup();
+    let run = |extra: &[&str]| {
+        let mut cmd = cx(dir.path());
+        cmd.args(["diff", "--json", "--committed"]).args(extra);
+        cmd.output().unwrap()
+    };
+    let totals =
+        |out: &[u8]| serde_json::from_slice::<serde_json::Value>(out).unwrap()["totals"].clone();
+
+    let explicit = run(&["--base", "main"]);
+    assert!(explicit.status.success());
+    assert_eq!(totals(&explicit.stdout), totals(&run(&[]).stdout));
+
+    let bogus = run(&["--base", "nope"]);
+    assert!(!bogus.status.success());
+    assert!(String::from_utf8_lossy(&bogus.stderr).contains("does not resolve"));
+}
+
 /// A one-commit repo holding exactly these files.
 fn repo_with(files: &[(&str, Vec<u8>)]) -> (tempfile::TempDir, Git) {
     let dir = tempfile::tempdir().unwrap();
@@ -796,8 +1045,7 @@ fn alpha_and_beta() -> [(&'static str, Vec<u8>); 4] {
 /// because the out-of-scope files are absent from the reference too.
 fn assert_scores_like_a_repo_of_its_own(scoped: &pipeline::AbsReport, alone: &[(&str, Vec<u8>)]) {
     let (_dir, alone_repo) = repo_with(alone);
-    let on_its_own =
-        pipeline::abs(&alone_repo, &AbsOptions::default(), Progress::default()).unwrap();
+    let on_its_own = pipeline::abs(&alone_repo, &Options::default(), Progress::default()).unwrap();
     let scores = |r: &pipeline::AbsReport| -> Vec<(String, u64)> {
         r.files.iter().map(|f| (f.path.clone(), f.bytes)).collect()
     };
@@ -816,7 +1064,7 @@ fn a_scoped_run_equals_a_repo_holding_only_that_scope() {
     let (_dir, whole) = repo_with(&alpha_and_beta());
     let scoped = pipeline::abs(
         &whole,
-        &AbsOptions {
+        &Options {
             globs: vec!["alpha/**".to_owned()],
             ..Default::default()
         },
@@ -843,7 +1091,8 @@ fn out_of_scope_files_are_neither_scored_nor_skipped() {
     let (_dir, git) = setup();
     let report = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             globs: vec!["src/**".to_owned()],
             ..Default::default()
@@ -879,7 +1128,8 @@ fn an_excluding_glob_drops_just_its_matches() {
     let run = |globs: Vec<String>| {
         pipeline::diff(
             &git,
-            &DiffOptions {
+            None,
+            &Options {
                 side: Side::Head,
                 globs,
                 ..Default::default()
@@ -911,7 +1161,7 @@ fn an_excluding_glob_drops_just_its_matches() {
 fn a_run_inside_a_subdirectory_equals_a_repo_holding_only_that_subtree() {
     let (dir, _whole) = repo_with(&alpha_and_beta());
     let inside = Git::discover_at(&dir.path().join("alpha")).unwrap();
-    let scoped = pipeline::abs(&inside, &AbsOptions::default(), Progress::default()).unwrap();
+    let scoped = pipeline::abs(&inside, &Options::default(), Progress::default()).unwrap();
 
     // Standing in `alpha/` names its files from there, so its twin holds
     // them at its own root.
@@ -922,18 +1172,17 @@ fn a_run_inside_a_subdirectory_equals_a_repo_holding_only_that_subtree() {
 }
 
 /// The same, through the binary: the process's directory is the run's
-/// root, so a rename inside it reads as one and the repository's other
-/// files are absent — not scored, and not skipped either.
+/// root, so a rename inside it reads as one, every path it prints —
+/// scored or skipped — is named from there, and the repository's other
+/// files are absent, not scored and not skipped either.
 #[test]
 fn the_binary_is_rooted_where_it_runs() {
     let (dir, _git) = setup();
-    let run = |cwd: &Path| -> serde_json::Value {
-        let out = Command::new(env!("CARGO_BIN_EXE_cx"))
-            .current_dir(cwd)
-            .args(["diff", "--json"])
-            .env_remove("CX_GLOB")
-            .output()
-            .unwrap();
+    // A file the filter drops, inside the subtree, so the skipped list
+    // has a name to get right too.
+    fs::write(dir.path().join("src/bundle.min.js"), gen_code(5, 40)).unwrap();
+    let run = |cwd: &Path, view: &str| -> serde_json::Value {
+        let out = cx(cwd).args([view, "--json"]).output().unwrap();
         assert!(
             out.status.success(),
             "{}",
@@ -951,8 +1200,21 @@ fn the_binary_is_rooted_where_it_runs() {
         paths.sort();
         paths
     };
+    let churn = |report: &serde_json::Value, name: &str| -> (u64, u64) {
+        let file = report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == name)
+            .unwrap_or_else(|| panic!("no {name} in {report}"));
+        (
+            file["added_lines"].as_u64().unwrap(),
+            file["deleted_lines"].as_u64().unwrap(),
+        )
+    };
 
-    let inside = run(&dir.path().join("src"));
+    let src = dir.path().join("src");
+    let inside = run(&src, "diff");
     assert_eq!(paths(&inside, "files"), ["gone.rs", "moved.rs", "novel.rs"]);
     assert_eq!(
         inside["files"]
@@ -963,12 +1225,17 @@ fn the_binary_is_rooted_where_it_runs() {
             .unwrap()["status"],
         "renamed from mover.rs"
     );
-    assert!(
-        paths(&inside, "skipped").is_empty(),
-        "the root's lockfile and binary are outside this run entirely"
+    assert_eq!(
+        paths(&inside, "skipped"),
+        ["bundle.min.js"],
+        "the run names what it skipped from where it stands, and the \
+         root's lockfile and binary are outside it entirely"
     );
-    // git keys its line counts by repository path, so the churn totals
-    // are the check that the run's own names stayed on the report side.
+    // git keys its line counts by repository path, so the churn — per
+    // file and in the totals — is the check that the run's own names
+    // stayed on the report side.
+    assert_eq!(churn(&inside, "novel.rs"), (120, 0));
+    assert_eq!(churn(&inside, "gone.rs"), (0, 120));
     assert_eq!(
         (
             inside["totals"]["added_lines"].as_u64().unwrap(),
@@ -978,16 +1245,27 @@ fn the_binary_is_rooted_where_it_runs() {
         "novel.rs added and gone.rs deleted, counted as git counts them"
     );
     assert_eq!(inside["root"], "src/", "the run says where it was rooted");
+    assert_eq!(
+        run(&src, "abs")["root"],
+        "src/",
+        "every view says where the run stood, not just the diff"
+    );
 
     // At the root the same repository reports its whole self.
-    let root = run(dir.path());
+    let root = run(dir.path(), "diff");
     assert_eq!(
         paths(&root, "files"),
         ["src/gone.rs", "src/moved.rs", "src/novel.rs"]
     );
+    assert_eq!(churn(&root, "src/novel.rs"), (120, 0));
     assert_eq!(
         paths(&root, "skipped"),
-        ["Cargo.lock", "logo.png", "tests/novel_test.rs"]
+        [
+            "Cargo.lock",
+            "logo.png",
+            "src/bundle.min.js",
+            "tests/novel_test.rs"
+        ]
     );
     assert_eq!(root["root"], "", "a run at the root is rooted nowhere else");
 }
@@ -1002,7 +1280,8 @@ fn globs_read_from_the_directory_the_run_is_in() {
     let paths = |globs: &[&str]| -> Vec<String> {
         let report = pipeline::diff(
             &inside,
-            &DiffOptions {
+            None,
+            &Options {
                 side: Side::Head,
                 globs: globs.iter().map(|g| (*g).to_owned()).collect(),
                 ..Default::default()
@@ -1037,7 +1316,8 @@ fn a_rename_from_outside_the_run_reads_as_an_add() {
     let inside = Git::discover_at(&root.join("alpha")).unwrap();
     let report = pipeline::diff(
         &inside,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -1054,5 +1334,177 @@ fn a_rename_from_outside_the_run_reads_as_an_add() {
     assert!(
         moved.review_bytes > 500,
         "content new to this codebase must cost review attention"
+    );
+    assert_eq!(
+        (moved.added_lines, moved.deleted_lines),
+        (120, 0),
+        "an add here, and an add's lines: git's rename record counts the \
+         move, which happened in a repository this run is not"
+    );
+}
+
+/// And the other way about: a rename whose destination is outside the
+/// run is a delete here. The file is gone from this codebase, and that
+/// it lives on elsewhere in the repository is not this run's business.
+#[test]
+fn a_rename_out_of_the_run_reads_as_a_delete() {
+    let (dir, _repo) = repo_with(&[
+        ("alpha/keep.rs", gen_code(1, 120)),
+        ("alpha/leaving.rs", gen_code(2, 120)),
+    ]);
+    let root = dir.path();
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    fs::create_dir(root.join("outside")).unwrap();
+    git(root, &["mv", "alpha/leaving.rs", "outside/leaving.rs"]);
+    git(root, &["commit", "-q", "-m", "move out"]);
+
+    let inside = Git::discover_at(&root.join("alpha")).unwrap();
+    let report = pipeline::diff(
+        &inside,
+        None,
+        &Options {
+            side: Side::Head,
+            ..Default::default()
+        },
+        Progress::default(),
+    )
+    .unwrap();
+
+    let left = report
+        .files
+        .iter()
+        .find(|f| f.path == "leaving.rs")
+        .expect("the file leaving this subtree must be reported");
+    assert_eq!(left.status, Status::Deleted);
+    assert_eq!((left.added_lines, left.deleted_lines), (0, 120));
+    assert!(
+        left.delta_bytes < -500,
+        "content leaving this codebase must refund its complexity"
+    );
+}
+
+/// The whole promise on the diff path, where the run's frame decides
+/// more than names: a run inside `alpha/` reports what a repository
+/// holding only `alpha/` reports — every status, score and line count,
+/// the file that moved in and the file that moved out included.
+#[test]
+fn a_diff_inside_a_subdirectory_equals_a_repo_holding_only_that_subtree() {
+    // One story, told twice: once in a repository that also holds
+    // `outside/`, once in a repository that never did.
+    let repo = |prefix: &str| -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let at = |name: &str| format!("{prefix}{name}");
+        let write = |path: String, content: Vec<u8>| {
+            let full = root.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, content).unwrap();
+        };
+        git(root, &["init", "-q", "-b", "main"]);
+        write(at("keep.rs"), gen_code(1, 120));
+        write(at("gone.rs"), gen_code(2, 120));
+        write(at("leaving.rs"), gen_code(3, 40));
+        if !prefix.is_empty() {
+            write("outside/arriving.rs".to_owned(), gen_code(4, 80));
+        }
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "base"]);
+
+        git(root, &["checkout", "-q", "-b", "feature"]);
+        write(at("keep.rs"), [gen_code(1, 120), gen_code(5, 10)].concat());
+        fs::remove_file(root.join(at("gone.rs"))).unwrap();
+        if prefix.is_empty() {
+            // The twin never held either file's other home: one appears,
+            // the other disappears.
+            write(at("arriving.rs"), gen_code(4, 80));
+            fs::remove_file(root.join(at("leaving.rs"))).unwrap();
+        } else {
+            git(root, &["mv", "outside/arriving.rs", &at("arriving.rs")]);
+            fs::create_dir_all(root.join("outside")).unwrap();
+            git(root, &["mv", &at("leaving.rs"), "outside/leaving.rs"]);
+        }
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "feature"]);
+        dir
+    };
+
+    let (whole, alone) = (repo("alpha/"), repo(""));
+    let scored = |dir: &Path| {
+        pipeline::diff(
+            &Git::discover_at(dir).unwrap(),
+            None,
+            &Options {
+                side: Side::Head,
+                ..Default::default()
+            },
+            Progress::default(),
+        )
+        .unwrap()
+    };
+    let scoped = scored(&whole.path().join("alpha"));
+    let on_its_own = scored(alone.path());
+
+    let facts = |r: &pipeline::DiffReport| -> Vec<String> {
+        r.files
+            .iter()
+            .map(|f| {
+                format!(
+                    "{} {:?} review {} Δ {} +{} −{} of {}",
+                    f.path,
+                    f.status,
+                    f.review_bytes,
+                    f.delta_bytes,
+                    f.added_lines,
+                    f.deleted_lines,
+                    f.new_lines,
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        facts(&scoped).len(),
+        4,
+        "keep.rs modified, gone.rs deleted, arriving.rs in, leaving.rs out"
+    );
+    assert_eq!(facts(&scoped), facts(&on_its_own));
+}
+
+/// The diff view's LINES column reports net churn, signed: a deleted
+/// file reads −, an added one +. The overview's column, measuring the
+/// tree rather than the change, stays an absolute count.
+#[test]
+fn diff_lines_column_reports_signed_net_churn() {
+    let (_dir, git) = setup();
+    let opts = report::Options {
+        top: 30,
+        files: true,
+        verbose: false,
+        color: false,
+    };
+    let committed = Options {
+        side: Side::Head,
+        ..Default::default()
+    };
+    let diff = pipeline::diff(&git, None, &committed, Progress::default()).unwrap();
+    let rendered = render_diff(&diff, opts);
+    let row = |name| {
+        rendered
+            .lines()
+            .find(|l| l.contains(name))
+            .unwrap_or_else(|| panic!("no {name} row in:\n{rendered}"))
+            .to_owned()
+    };
+    assert!(row("novel.rs").contains("+120"), "{}", row("novel.rs"));
+    assert!(row("gone.rs").contains("−120"), "{}", row("gone.rs"));
+
+    let abs = pipeline::abs(&git, &committed, Progress::default()).unwrap();
+    let overview = render_overview(&abs, &diff, opts);
+    let novel = overview
+        .lines()
+        .find(|l| l.contains("novel.rs"))
+        .unwrap_or_else(|| panic!("no novel.rs row in:\n{overview}"));
+    assert!(
+        novel.contains("120") && !novel.contains("+120"),
+        "absolute, not a delta: {novel}"
     );
 }

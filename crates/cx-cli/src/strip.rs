@@ -1,17 +1,28 @@
-//! The code-only view of a file: comments removed, blank lines dropped.
-//! Which bytes are comments comes from tokei's per-language table (line
-//! and block delimiters, nesting, string quotes), so a `//` inside a
-//! string literal is code and `r#"/* … */"#` survives intact.
+//! The code-only view of a file: comments removed, string literals
+//! emptied to their delimiters, blank lines dropped. Which bytes are
+//! which comes from tokei's per-language table (line and block
+//! delimiters, nesting, string quotes), so a `//` inside a string
+//! literal opens no comment and `r#"…"#` still closes at `"#`.
 
 use crate::language;
 
-/// `content` with its comments removed and whitespace-only lines dropped,
-/// or `content` itself when `path` and `content` name no language tokei
-/// knows.
-pub fn code_only(path: &str, content: Vec<u8>) -> Vec<u8> {
+/// Which stripped-by-default byte classes a run scores anyway. `Default`
+/// is the code-only view: comments out, string contents out.
+#[derive(Clone, Copy, Default)]
+pub struct Keep {
+    pub comments: bool,
+    pub strings: bool,
+}
+
+/// `content` with its comments removed (unless kept), each string
+/// literal reduced to its delimiters (unless kept — the string counts,
+/// its contents do not), and whitespace-only lines dropped. With
+/// everything kept, or when `path` and `content` name no language tokei
+/// knows, `content` passes through untouched.
+pub fn code_only(path: &str, content: Vec<u8>, keep: Keep) -> Vec<u8> {
     match Syntax::of(path, &content) {
-        Some(syntax) => syntax.strip(&content),
-        None => content,
+        Some(syntax) if !(keep.comments && keep.strings) => syntax.strip(&content, keep),
+        _ => content,
     }
 }
 
@@ -51,6 +62,22 @@ enum State {
     },
 }
 
+impl State {
+    /// Just inside a block comment's opener: depth 1, deepened by `open`
+    /// when the comment nests.
+    fn block(open: Option<&'static str>, close: &'static str) -> Self {
+        State::Block {
+            open,
+            close,
+            depth: 1,
+        }
+    }
+
+    fn string(close: &'static str, verbatim: bool) -> Self {
+        State::Str { close, verbatim }
+    }
+}
+
 impl Syntax {
     fn of(path: &str, content: &[u8]) -> Option<Self> {
         let lang = language::of(path, content)?;
@@ -82,95 +109,54 @@ impl Syntax {
             consider(t, State::Line);
         }
         for &(o, c) in self.block {
-            consider(
-                o,
-                State::Block {
-                    open: self.nested.then_some(o),
-                    close: c,
-                    depth: 1,
-                },
-            );
+            consider(o, State::block(self.nested.then_some(o), c));
         }
         for &(o, c) in self.nested_block {
-            consider(
-                o,
-                State::Block {
-                    open: Some(o),
-                    close: c,
-                    depth: 1,
-                },
-            );
+            consider(o, State::block(Some(o), c));
         }
         for &(o, c) in self.quotes {
-            consider(
-                o,
-                State::Str {
-                    close: c,
-                    verbatim: false,
-                },
-            );
+            consider(o, State::string(c, false));
         }
         for &(o, c) in self.verbatim {
-            consider(
-                o,
-                State::Str {
-                    close: c,
-                    verbatim: true,
-                },
-            );
+            consider(o, State::string(c, true));
         }
         for &(o, c) in self.doc {
             let state = if statement_start {
-                State::Block {
-                    open: None,
-                    close: c,
-                    depth: 1,
-                }
+                State::block(None, c)
             } else {
-                State::Str {
-                    close: c,
-                    verbatim: false,
-                }
+                State::string(c, false)
             };
             consider(o, state);
         }
         best
     }
 
-    fn strip(&self, src: &[u8]) -> Vec<u8> {
+    fn strip(&self, src: &[u8], keep: Keep) -> Vec<u8> {
         let mut out = Out::with_capacity(src.len());
         let mut state = State::Code;
         let mut i = 0;
         while i < src.len() {
             let rest = &src[i..];
-            match state {
+            let (len, kept) = match state {
                 State::Code => match self.opener_at(rest, out.statement_start) {
-                    // A string's delimiter is code, so it's kept; a
-                    // comment's is not.
-                    Some((len, entered @ State::Str { .. })) => {
-                        out.push(&rest[..len]);
-                        state = entered;
-                        i += len;
-                    }
+                    // A string's delimiter is code, so it's always kept;
+                    // a comment's belongs to the comment.
                     Some((len, entered)) => {
                         state = entered;
-                        i += len;
+                        (len, matches!(entered, State::Str { .. }) || keep.comments)
                     }
-                    None => {
-                        out.push(&rest[..1]);
-                        i += 1;
-                    }
+                    None => (1, true),
                 },
                 State::Line => {
                     if rest[0] == b'\n' {
-                        out.push(b"\n");
                         state = State::Code;
+                        (1, true)
+                    } else {
+                        (1, keep.comments)
                     }
-                    i += 1;
                 }
                 State::Block { open, close, depth } => {
                     if rest.starts_with(close.as_bytes()) {
-                        i += close.len();
                         state = if depth == 1 {
                             State::Code
                         } else {
@@ -180,35 +166,33 @@ impl Syntax {
                                 depth: depth - 1,
                             }
                         };
-                    } else if let Some(open) = open.filter(|o| rest.starts_with(o.as_bytes())) {
-                        i += open.len();
+                        (close.len(), keep.comments)
+                    } else if let Some(o) = open.filter(|o| rest.starts_with(o.as_bytes())) {
                         state = State::Block {
-                            open: Some(open),
+                            open,
                             close,
                             depth: depth + 1,
                         };
+                        (o.len(), keep.comments)
                     } else {
-                        if rest[0] == b'\n' {
-                            out.push(b"\n");
-                        }
-                        i += 1;
+                        (1, rest[0] == b'\n' || keep.comments)
                     }
                 }
                 State::Str { close, verbatim } => {
                     if !verbatim && rest[0] == b'\\' {
-                        let n = rest.len().min(2);
-                        out.push(&rest[..n]);
-                        i += n;
+                        (rest.len().min(2), keep.strings)
                     } else if rest.starts_with(close.as_bytes()) {
-                        out.push(close.as_bytes());
                         state = State::Code;
-                        i += close.len();
+                        (close.len(), true)
                     } else {
-                        out.push(&rest[..1]);
-                        i += 1;
+                        (1, keep.strings)
                     }
                 }
+            };
+            if kept {
+                out.push(&rest[..len]);
             }
+            i += len;
         }
         without_blank_lines(&out.bytes)
     }
@@ -242,12 +226,8 @@ impl Out {
 fn without_blank_lines(text: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
     for line in text.split(|&b| b == b'\n') {
-        let end = line
-            .iter()
-            .rposition(|b| !b.is_ascii_whitespace())
-            .map_or(0, |p| p + 1);
-        if end > 0 {
-            out.extend_from_slice(&line[..end]);
+        if let Some(end) = line.iter().rposition(|b| !b.is_ascii_whitespace()) {
+            out.extend_from_slice(&line[..=end]);
             out.push(b'\n');
         }
     }
@@ -259,7 +239,11 @@ mod tests {
     use super::*;
 
     fn strip(path: &str, src: &str) -> String {
-        String::from_utf8(code_only(path, src.as_bytes().to_vec())).unwrap()
+        strip_keeping(path, src, Keep::default())
+    }
+
+    fn strip_keeping(path: &str, src: &str, keep: Keep) -> String {
+        String::from_utf8(code_only(path, src.as_bytes().to_vec(), keep)).unwrap()
     }
 
     #[test]
@@ -288,32 +272,46 @@ mod tests {
             ("a.ml", "(* c *)\nlet x = 1\n", "let x = 1\n"),
             ("a.html", "<!-- c -->\n<p>hi</p>\n", "<p>hi</p>\n"),
             ("a.d", "/+ nests /+ here +/ +/\nint x;\n", "int x;\n"),
+            // A non-nesting block comment closes at the first terminator.
+            ("a.c", "/* x /* y */ int z;\n", " int z;\n"),
         ] {
             assert_eq!(strip(path, src), want, "{path}");
         }
     }
 
+    /// The default view of a string literal: the delimiters count, the
+    /// contents do not.
     #[test]
-    fn comment_markers_inside_strings_are_code() {
-        assert_eq!(
-            strip("a.rs", "let u = \"http://x\"; // real\n"),
-            "let u = \"http://x\";\n"
-        );
-        assert_eq!(
-            strip("a.rs", "let s = r#\"/* kept */ \\\"#; /* gone */\n"),
-            "let s = r#\"/* kept */ \\\"#;\n"
-        );
-        assert_eq!(
-            strip("a.py", "s = 'it\\'s # not'  # is\n"),
-            "s = 'it\\'s # not'\n"
-        );
+    fn string_contents_are_stripped_delimiters_kept() {
+        for (path, src, want) in [
+            ("a.rs", "let s = \"secret contents\";\n", "let s = \"\";\n"),
+            ("a.py", "s = 'it # counts not'  # gone\n", "s = ''\n"),
+            // Escapes are contents too, and an escaped quote does not close.
+            ("a.rs", "let s = \"a\\\"b\\n\";\n", "let s = \"\";\n"),
+            // A multiline string collapses to its delimiters.
+            (
+                "a.py",
+                "x = \"\"\"a\nb\"\"\" + y\n",
+                "x = \"\"\"\"\"\" + y\n",
+            ),
+            // Comment markers inside a string open no comment.
+            ("a.rs", "let u = \"http://x\"; // real\n", "let u = \"\";\n"),
+            (
+                "a.rs",
+                "let s = r#\"/* ignored */ \\\"#; /* gone */\n",
+                "let s = r#\"\"#;\n",
+            ),
+            ("a.py", "s = 'it\\'s # not'  # is\n", "s = ''\n"),
+        ] {
+            assert_eq!(strip(path, src), want, "{src}");
+        }
     }
 
     #[test]
     fn doc_quote_off_statement_is_a_longer_string_quote() {
         assert_eq!(
             strip("a.py", "x = \"\"\"a\" # c\"\"\"\ny = 1\n"),
-            "x = \"\"\"a\" # c\"\"\"\ny = 1\n"
+            "x = \"\"\"\"\"\"\ny = 1\n"
         );
     }
 
@@ -328,7 +326,7 @@ mod tests {
         );
         assert_eq!(
             strip("a.py", "x = \"\"\"kept\nboth\"\"\"\n"),
-            "x = \"\"\"kept\nboth\"\"\"\n"
+            "x = \"\"\"\"\"\"\n"
         );
     }
 
@@ -340,7 +338,7 @@ mod tests {
         );
         assert_eq!(
             strip("a.rs", "let s = \"open // not\nfn g() {}\n"),
-            "let s = \"open // not\nfn g() {}\n"
+            "let s = \"\n"
         );
     }
 
@@ -358,17 +356,14 @@ mod tests {
 
     #[test]
     fn unknown_language_is_returned_untouched() {
-        let src = b"// looks like a comment\n\n".to_vec();
-        assert_eq!(code_only("notes.unknownext", src.clone()), src);
-        assert_eq!(code_only("Makefile", b"# c\nall:\n".to_vec()), b"all:\n");
+        let src = "// looks like a comment\n\n";
+        assert_eq!(strip("notes.unknownext", src), src);
+        assert_eq!(strip("Makefile", "# c\nall:\n"), "all:\n");
     }
 
     #[test]
     fn shebang_decides_the_language_when_the_path_does_not() {
-        assert_eq!(
-            code_only("bin/run", b"#!/bin/sh\n# c\necho hi\n".to_vec()),
-            b"echo hi\n"
-        );
+        assert_eq!(strip("bin/run", "#!/bin/sh\n# c\necho hi\n"), "echo hi\n");
     }
 
     #[test]
@@ -376,6 +371,69 @@ mod tests {
         assert_eq!(
             strip("a.vim", "let s = \"x\" | echo s\n\" comment\nlet t = 1\n"),
             "let s =\nlet t = 1\n"
+        );
+    }
+
+    /// Each stripped-by-default class comes back on request, restoring
+    /// exactly its bytes.
+    #[test]
+    fn keeping_a_class_restores_its_bytes() {
+        for (path, src, keep, want) in [
+            // Keeping comments still empties strings.
+            (
+                "a.rs",
+                "let s = \"x\"; // note\n\n/* block */\nfn g() {}\n",
+                Keep {
+                    comments: true,
+                    strings: false,
+                },
+                "let s = \"\"; // note\n/* block */\nfn g() {}\n",
+            ),
+            // A docstring is kept as a comment, not emptied as a string.
+            (
+                "a.py",
+                "def f():\n    \"\"\"Doc\"\"\"\n    return \"x\"\n",
+                Keep {
+                    comments: true,
+                    strings: false,
+                },
+                "def f():\n    \"\"\"Doc\"\"\"\n    return \"\"\n",
+            ),
+            // Keeping strings restores their contents.
+            (
+                "a.rs",
+                "let u = \"http://x\"; // real\n",
+                Keep {
+                    comments: false,
+                    strings: true,
+                },
+                "let u = \"http://x\";\n",
+            ),
+            // Keeping both is the raw file: blank lines survive too.
+            (
+                "a.rs",
+                "// c\n\nlet s = \"x\";\n",
+                Keep {
+                    comments: true,
+                    strings: true,
+                },
+                "// c\n\nlet s = \"x\";\n",
+            ),
+        ] {
+            assert_eq!(strip_keeping(path, src, keep), want, "{src}");
+        }
+    }
+
+    #[test]
+    fn a_lone_backslash_at_the_end_cannot_escape_past_it() {
+        assert_eq!(strip("a.rs", "let s = \"abc\\"), "let s = \"\n");
+        let keep = Keep {
+            comments: false,
+            strings: true,
+        };
+        assert_eq!(
+            strip_keeping("a.rs", "let s = \"abc\\", keep),
+            "let s = \"abc\\\n"
         );
     }
 }

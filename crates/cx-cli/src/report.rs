@@ -3,7 +3,7 @@ use crossterm::style::{ResetColor, SetForegroundColor};
 
 use crate::breakdown::{self, Entry, Node};
 use crate::git::Status;
-use crate::pipeline::{AbsReport, DiffFile, DiffReport, VersionInfo};
+use crate::pipeline::{AbsReport, DiffFile, DiffReport, Run};
 
 #[derive(Clone, Copy)]
 pub struct Options {
@@ -31,7 +31,7 @@ impl Options {
     }
 }
 
-fn entry<'a>(path: &'a str, bytes: f64, lines: u64, change: Option<&DiffFile>) -> Entry<'a> {
+fn entry<'a>(path: &'a str, bytes: f64, lines: i64, change: Option<&DiffFile>) -> Entry<'a> {
     Entry {
         path,
         bytes,
@@ -94,14 +94,14 @@ struct Row {
     bytes: f64,
     delta: Option<f64>,
     marker: Option<String>,
-    lines: Option<u64>,
+    lines: String,
     label: String,
     is_dir: bool,
     dim: bool,
 }
 
 impl Row {
-    fn push_onto(self, table: &mut Table, total: f64, show_delta: bool) {
+    fn push_onto(self, table: &mut Table, total: f64, view: View) {
         let dim = self.dim.then_some(Color::DarkGrey);
         let share = 100.0 * self.bytes / total;
         let filled = ((share / 10.0).round() as usize).min(10);
@@ -109,7 +109,7 @@ impl Row {
             fmt_bytes(self.bytes),
             dim.or_else(|| score_color(self.bytes)),
         )];
-        if show_delta {
+        if view != View::Abs {
             cells.push(self.delta.map_or_else(
                 || Cell::new(""),
                 |d| num_cell(fmt_signed(d), dim.or_else(|| score_color(d))),
@@ -124,7 +124,7 @@ impl Row {
             path_cell = path_cell.add_attribute(Attribute::Bold);
         }
         cells.extend([
-            num_cell(self.lines.map_or("-".to_owned(), |l| l.to_string()), dim),
+            num_cell(self.lines, dim),
             path_cell,
             num_cell(
                 format!(
@@ -139,7 +139,7 @@ impl Row {
     }
 }
 
-fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, show_delta: bool) {
+fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, view: View) {
     let child_count = node.children.len() + usize::from(node.elided.is_some());
     for (i, child) in node.children.iter().enumerate() {
         let is_last = i + 1 == child_count;
@@ -153,71 +153,84 @@ fn push_children(table: &mut Table, node: &Node, prefix: &str, total: f64, show_
             bytes: child.bytes,
             delta: child.delta,
             marker: child.marker.clone(),
-            lines: Some(child.lines),
+            lines: view.fmt_lines(child.lines),
             label: format!("{prefix}{connector}{tip}{}", child.name),
             is_dir: child.is_dir,
             dim: false,
         }
-        .push_onto(table, total, show_delta);
+        .push_onto(table, total, view);
         let child_prefix = format!("{prefix}{}", if is_last { "  " } else { "│ " });
-        push_children(table, child, &child_prefix, total, show_delta);
+        push_children(table, child, &child_prefix, total, view);
     }
     if let Some(elided) = &node.elided {
         Row {
             bytes: elided.bytes,
             delta: elided.delta,
             marker: None,
-            lines: None,
+            lines: "-".to_owned(),
             label: format!("{prefix}└── … +{} more", elided.count),
             is_dir: false,
             dim: true,
         }
-        .push_onto(table, total, show_delta);
+        .push_onto(table, total, view);
     }
 }
 
-fn view<'a>(
-    entries: impl IntoIterator<Item = Entry<'a>>,
-    total: f64,
-    opts: Options,
-    diff_columns: Option<&'static str>,
-    footer: String,
-) -> String {
-    if !opts.files {
-        return footer;
-    }
-    let tree = breakdown::breakdown(entries, opts.top);
-    if tree.children.is_empty() {
-        return footer;
-    }
-    let columns: &[&str] = match diff_columns {
-        Some(bytes_header) => &[bytes_header, "ΔCX", "", "LINES", "PATH", "SHARE"],
-        None => &["BYTES", "LINES", "PATH", "SHARE"],
-    };
-    let mut table = Table::new();
-    if opts.color {
-        table.enforce_styling();
-    } else {
-        table.force_no_tty();
-    }
-    table.load_preset(presets::NOTHING);
-    table.set_content_arrangement(ContentArrangement::Dynamic);
-    table.set_header(columns.iter().map(|c| Cell::new(c).fg(Color::DarkGrey)));
-    push_children(&mut table, &tree, "", total, diff_columns.is_some());
-    format!("{table}\n\n{footer}")
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Diff,
+    Overview,
+    Abs,
 }
 
-fn footer(
-    opts: Options,
-    version: &VersionInfo,
-    root: &str,
-    abs: Option<&AbsReport>,
-    diff: Option<&DiffReport>,
-) -> String {
+impl View {
+    /// LINES is the net line change in the diff view, an absolute count elsewhere.
+    fn fmt_lines(self, n: i64) -> String {
+        match self {
+            View::Diff if n > 0 => format!("+{n}"),
+            View::Diff if n < 0 => format!("−{}", -n),
+            _ => n.to_string(),
+        }
+    }
+
+    fn render<'a>(
+        self,
+        entries: impl IntoIterator<Item = Entry<'a>>,
+        total: f64,
+        opts: Options,
+        footer: String,
+    ) -> String {
+        if !opts.files {
+            return footer;
+        }
+        let tree = breakdown::breakdown(entries, opts.top);
+        if tree.children.is_empty() {
+            return footer;
+        }
+        let columns: &[&str] = match self {
+            View::Diff => &["REVIEW", "ΔCX", "", "LINES", "PATH", "SHARE"],
+            View::Overview => &["BYTES", "ΔCX", "", "LINES", "PATH", "SHARE"],
+            View::Abs => &["BYTES", "LINES", "PATH", "SHARE"],
+        };
+        let mut table = Table::new();
+        if opts.color {
+            table.enforce_styling();
+        } else {
+            table.force_no_tty();
+        }
+        table.load_preset(presets::NOTHING);
+        table.set_content_arrangement(ContentArrangement::Dynamic);
+        table.set_header(columns.iter().map(|c| Cell::new(c).fg(Color::DarkGrey)));
+        push_children(&mut table, &tree, "", total, self);
+        format!("{table}\n\n{footer}")
+    }
+}
+
+fn footer(opts: Options, run: &Run, abs: Option<&AbsReport>, diff: Option<&DiffReport>) -> String {
     let mut summary = Vec::new();
     let mut details = Vec::new();
-    if !root.is_empty() {
-        details.push(opts.dim(format!("rooted at {}", root.trim_end_matches('/'))));
+    if !run.root.is_empty() {
+        details.push(opts.dim(format!("rooted at {}", run.root.trim_end_matches('/'))));
     }
     if let Some(abs) = abs {
         summary.push(opts.stat("C(tree)", fmt_bytes(abs.compressed_bytes as f64), None));
@@ -252,7 +265,7 @@ fn footer(
     if opts.verbose {
         details.push(opts.dim(format!(
             "zstd {}, level {}, window≤2^{}",
-            version.zstd, version.level, version.max_window_log
+            run.version.zstd, run.version.level, run.version.max_window_log
         )));
         lines.append(&mut details);
     }
@@ -261,16 +274,15 @@ fn footer(
 
 pub fn render_diff(report: &DiffReport, opts: Options) -> String {
     let total = report.totals.review_bytes.max(1) as f64;
-    let entries = report
-        .files
-        .iter()
-        .map(|f| entry(&f.path, f.review_bytes as f64, f.new_lines, Some(f)));
-    view(
+    let entries = report.files.iter().map(|f| {
+        let delta = f.added_lines as i64 - f.deleted_lines as i64;
+        entry(&f.path, f.review_bytes as f64, delta, Some(f))
+    });
+    View::Diff.render(
         entries,
         total,
         opts,
-        Some("REVIEW"),
-        footer(opts, &report.version, &report.root, None, Some(report)),
+        footer(opts, &report.run, None, Some(report)),
     )
 }
 
@@ -284,7 +296,7 @@ pub fn render_overview(abs: &AbsReport, diff: &DiffReport, opts: Options) -> Str
             entry(
                 &f.path,
                 f.bytes as f64,
-                f.lines,
+                f.lines as i64,
                 changed.remove(f.path.as_str()),
             )
         })
@@ -296,12 +308,11 @@ pub fn render_overview(abs: &AbsReport, diff: &DiffReport, opts: Options) -> Str
     );
 
     let total = abs.compressed_bytes.max(1) as f64;
-    view(
+    View::Overview.render(
         entries,
         total,
         opts,
-        Some("BYTES"),
-        footer(opts, &abs.version, &abs.root, Some(abs), Some(diff)),
+        footer(opts, &abs.run, Some(abs), Some(diff)),
     )
 }
 
@@ -310,13 +321,12 @@ pub fn render_abs(report: &AbsReport, opts: Options) -> String {
     let entries = report
         .files
         .iter()
-        .map(|f| entry(&f.path, f.bytes as f64, f.lines, None));
-    view(
+        .map(|f| entry(&f.path, f.bytes as f64, f.lines as i64, None));
+    View::Abs.render(
         entries,
         total,
         opts,
-        None,
-        footer(opts, &report.version, &report.root, Some(report), None),
+        footer(opts, &report.run, Some(report), None),
     )
 }
 
@@ -345,21 +355,23 @@ fn fmt_signed(bytes: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{AbsFile, Skipped, Totals};
+    use crate::pipeline::{AbsFile, Skipped, Totals, VersionInfo};
 
-    fn version() -> VersionInfo {
-        VersionInfo {
-            cx: "0",
-            zstd: "1.5.7".into(),
-            level: 19,
-            max_window_log: 31,
+    fn run() -> Run {
+        Run {
+            version: VersionInfo {
+                cx: "0",
+                zstd: "1.5.7".into(),
+                level: 19,
+                max_window_log: 31,
+            },
+            root: String::new(),
         }
     }
 
     fn abs_report() -> AbsReport {
         AbsReport {
-            version: version(),
-            root: String::new(),
+            run: run(),
             snapshot: "HEAD",
             file_count: 2,
             raw_bytes: 40960,
@@ -385,6 +397,8 @@ mod tests {
             status,
             review_bytes: 2048,
             delta_bytes: 1024,
+            added_lines: 40,
+            deleted_lines: 12,
             new_lines: 40,
             bytes_per_line: None,
             density_outlier,
@@ -393,8 +407,7 @@ mod tests {
 
     fn diff_report() -> DiffReport {
         DiffReport {
-            version: version(),
-            root: String::new(),
+            run: run(),
             base: "master".into(),
             merge_base: "abc123".into(),
             files: vec![diff_file(Status::Modified, false)],
@@ -460,7 +473,7 @@ mod tests {
             ..OPTS
         };
         let mut abs = abs_report();
-        abs.root = "crates/cx-cli/".into();
+        abs.run.root = "crates/cx-cli/".into();
         assert!(
             footer(&abs, &diff_report(), opts).contains(" rooted at crates/cx-cli\n"),
             "the run's root belongs in the details"
