@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 pub struct Entry<'a> {
     pub path: &'a str,
     pub bytes: f64,
-    pub lines: u64,
+    pub lines: i64,
     pub delta: Option<f64>,
     pub marker: Option<String>,
 }
@@ -11,7 +11,7 @@ pub struct Entry<'a> {
 pub struct Node {
     pub name: String,
     pub bytes: f64,
-    pub lines: u64,
+    pub lines: i64,
     pub delta: Option<f64>,
     pub marker: Option<String>,
     pub is_dir: bool,
@@ -41,7 +41,7 @@ pub fn breakdown<'a>(entries: impl IntoIterator<Item = Entry<'a>>, top: usize) -
 #[derive(Default)]
 struct Builder {
     bytes: f64,
-    lines: u64,
+    lines: i64,
     delta_sum: f64,
     touched: bool,
     marker: Option<String>,
@@ -111,7 +111,7 @@ impl Builder {
 mod tests {
     use super::*;
 
-    fn file(path: &'static str, bytes: f64, lines: u64) -> Entry<'static> {
+    fn file(path: &'static str, bytes: f64, lines: i64) -> Entry<'static> {
         Entry {
             path,
             bytes,

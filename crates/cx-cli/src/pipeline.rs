@@ -21,22 +21,41 @@ use crate::strip;
 
 const DEFAULT_BASES: [&str; 4] = ["main", "master", "origin/main", "origin/master"];
 
+/// What a scoring run selects; every view shares the same choices. The
+/// overview scores two views of one invocation, and they must agree on
+/// which files exist or the merged report describes two repositories.
 #[derive(Default)]
-pub struct DiffOptions {
-    pub base: Option<String>,
+pub struct Options {
     pub side: Side,
     /// Score test files too. Otherwise they leave the universe entirely:
     /// in no reference and no scoring pass, and reported as skipped.
     pub include_tests: bool,
-    /// Score comments too. Otherwise every blob is reduced to code before
-    /// it enters any reference or scoring pass.
-    pub comments: bool,
+    /// Stripped-by-default byte classes — comments, string literal
+    /// contents — to score anyway. Otherwise every blob is reduced to
+    /// code before it enters any reference or scoring pass.
+    pub keep: strip::Keep,
     /// Score prose files (Markdown, reStructuredText, …) too. Otherwise
     /// they are skipped, like tests.
     pub prose: bool,
+    /// Score data files (JSON, CSV, …) too. Otherwise they are skipped,
+    /// like prose.
+    pub data: bool,
     /// Restrict the run to the paths these globs select — see [`Scope`].
     /// Empty is the whole repository.
     pub globs: Vec<String>,
+}
+
+impl Options {
+    /// The file filter these selections configure.
+    fn filter(&self, git: &Git, attr_paths: &[String]) -> Result<Filter> {
+        Filter::new(
+            git.root(),
+            git.linguist_attrs(attr_paths)?,
+            self.include_tests,
+            self.prose,
+            self.data,
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -71,6 +90,10 @@ pub struct DiffFile {
     pub review_bytes: u64,
     /// Metric 2: complexity added (+) or removed (−).
     pub delta_bytes: i64,
+    /// Diff churn: lines this file adds and removes against the merge base.
+    /// The signed net (added − deleted) is the diff view's LINES column.
+    pub added_lines: u64,
+    pub deleted_lines: u64,
     pub new_lines: u64,
     /// review_bytes / new_lines — density separates tables from
     /// algorithms. Only defined for added files, where all lines are
@@ -105,11 +128,10 @@ fn lines(content: &[u8]) -> u64 {
 /// needs them); everything after sees code only.
 type Prepared = Result<Vec<u8>, &'static str>;
 
-fn prepare(filter: &Filter, comments: bool, path: &str, raw: Vec<u8>) -> Prepared {
+fn prepare(filter: &Filter, keep: strip::Keep, path: &str, raw: Vec<u8>) -> Prepared {
     match filter.exclusion(path, &raw) {
         Some(reason) => Err(reason),
-        None if comments => Ok(raw),
-        None => Ok(strip::code_only(path, raw)),
+        None => Ok(strip::code_only(path, raw, keep)),
     }
 }
 
@@ -121,7 +143,7 @@ fn prepare(filter: &Filter, comments: bool, path: &str, raw: Vec<u8>) -> Prepare
 /// ones before it and a permutation would silently change every score.
 fn load<'a>(
     filter: &Filter,
-    comments: bool,
+    keep: strip::Keep,
     paths: &[&'a str],
     mut blobs: Vec<Option<Vec<u8>>>,
 ) -> Vec<(&'a str, Prepared)> {
@@ -137,7 +159,7 @@ fn load<'a>(
                         .iter()
                         .zip(blobs)
                         .filter_map(|(path, blob)| {
-                            Some((*path, prepare(filter, comments, path, blob.take()?)))
+                            Some((*path, prepare(filter, keep, path, blob.take()?)))
                         })
                         .collect::<Vec<_>>()
                 })
@@ -194,20 +216,6 @@ pub struct DiffReport {
     pub totals: Totals,
 }
 
-#[derive(Default)]
-pub struct AbsOptions {
-    /// Score test files too; otherwise they leave the universe entirely.
-    pub include_tests: bool,
-    /// Score comments too; otherwise every blob is reduced to code first.
-    pub comments: bool,
-    /// Score prose files too; otherwise they are skipped.
-    pub prose: bool,
-    pub side: Side,
-    /// Restrict the run to the paths these globs select — see [`Scope`].
-    /// Empty is the whole repository.
-    pub globs: Vec<String>,
-}
-
 /// One file's contribution to C(tree): its sequential chain-rule score in
 /// sorted-path order.
 #[derive(Serialize)]
@@ -225,22 +233,6 @@ pub struct AbsReport {
     pub raw_bytes: u64,
     pub compressed_bytes: u64,
     pub files: Vec<AbsFile>,
-}
-
-impl DiffOptions {
-    /// The tree view of the same run. Every field but the base says which
-    /// files exist for this invocation, and the two views must agree on
-    /// that or the merged report describes two different repositories —
-    /// so the tree view is derived here rather than built alongside.
-    pub fn tree(&self) -> AbsOptions {
-        AbsOptions {
-            include_tests: self.include_tests,
-            comments: self.comments,
-            prose: self.prose,
-            side: self.side,
-            globs: self.globs.clone(),
-        }
-    }
 }
 
 /// The status stays typed everywhere; this string form exists only at
@@ -267,7 +259,7 @@ struct Item {
 /// The code an abs run scores, fetched and prepared. The blobs are owned
 /// apart from the pass that reads them, which is what lets the overview
 /// score this view alongside the diff's.
-pub struct AbsSources {
+struct AbsSources {
     snapshot: &'static str,
     /// Each kept blob, filtered and reduced to code, in the order
     /// `git.list` produced — already sorted, which the chain rule wants.
@@ -275,7 +267,7 @@ pub struct AbsSources {
 }
 
 impl AbsSources {
-    pub fn fetch(git: &Git, opts: &AbsOptions) -> Result<Self> {
+    fn fetch(git: &Git, opts: &Options) -> Result<Self> {
         // Scoped before the blobs are fetched: out of scope is out of the
         // repository, as far as this run is concerned.
         let scope = Scope::new(git.root(), &opts.globs)?;
@@ -288,15 +280,10 @@ impl AbsSources {
             .zip(&blobs)
             .filter_map(|(p, b)| b.as_ref().map(|_| p.to_string()))
             .collect();
-        let filter = Filter::new(
-            git.root(),
-            git.linguist_attrs(&attr_paths)?,
-            opts.include_tests,
-            opts.prose,
-        )?;
+        let filter = opts.filter(git, &attr_paths)?;
         Ok(AbsSources {
             snapshot: opts.side.label(),
-            kept: load(&filter, opts.comments, &path_refs, blobs)
+            kept: load(&filter, opts.keep, &path_refs, blobs)
                 .into_iter()
                 .filter_map(|(path, prepared)| Some((path.to_owned(), prepared.ok()?)))
                 .collect(),
@@ -305,12 +292,12 @@ impl AbsSources {
 
     /// C(tree): one chain-rule pass over the whole snapshot, with no
     /// reference — each file is conditioned on the ones before it.
-    pub fn passes<'a>(&'a self, scorer: &'a Scorer) -> [Attribution<'a>; 1] {
+    fn passes<'a>(&'a self, scorer: &'a Scorer) -> [Attribution<'a>; 1] {
         let kept: Vec<&[u8]> = self.kept.iter().map(|(_, code)| code.as_slice()).collect();
         [scorer.attribution(&[], &kept)]
     }
 
-    pub fn report(self, scorer: &Scorer, [tree]: [Vec<u64>; 1]) -> AbsReport {
+    fn report(self, scorer: &Scorer, [tree]: [Vec<u64>; 1]) -> AbsReport {
         let mut files: Vec<AbsFile> = self
             .kept
             .iter()
@@ -335,7 +322,7 @@ impl AbsSources {
 
 /// The code a diff run scores, fetched and prepared: the base tree, the
 /// items worth scoring, and the churn git counted.
-pub struct DiffSources {
+struct DiffSources {
     base: String,
     merge_base: String,
     /// The kept base tree in the sorted order git produced, each file's
@@ -345,12 +332,13 @@ pub struct DiffSources {
     /// The changes with at least one scorable side, sorted by path.
     items: Vec<Item>,
     skipped: Vec<Skipped>,
+    /// Lines added and deleted per repository path, as git counted them.
     churn: HashMap<String, (u64, u64)>,
 }
 
 impl DiffSources {
-    pub fn fetch(git: &Git, opts: &DiffOptions) -> Result<Self> {
-        let base = resolve_base(git, opts.base.as_deref())?;
+    fn fetch(git: &Git, base: Option<&str>, opts: &Options) -> Result<Self> {
+        let base = resolve_base(git, base)?;
         let merge_base = git.merge_base(&base, "HEAD")?;
         // Scoping happens on the raw listings, before a blob is fetched: an
         // out-of-scope path is not in the reference, not scored, and not
@@ -371,18 +359,13 @@ impl DiffSources {
             .cloned()
             .chain(new_side_paths.iter().map(|p| p.to_string()))
             .collect();
-        let filter = Filter::new(
-            git.root(),
-            git.linguist_attrs(&attr_paths)?,
-            opts.include_tests,
-            opts.prose,
-        )?;
+        let filter = opts.filter(git, &attr_paths)?;
 
         // The whole old tree plus the new side of every change, each blob
         // filtered and reduced to code once.
         let mut old_tree: HashMap<&str, Prepared> = load(
             &filter,
-            opts.comments,
+            opts.keep,
             &tree_refs,
             git.tree_contents(&merge_base, &tree_refs)?,
         )
@@ -390,7 +373,7 @@ impl DiffSources {
         .collect();
         let new_contents: HashMap<&str, Prepared> = load(
             &filter,
-            opts.comments,
+            opts.keep,
             &new_side_paths,
             git.contents(opts.side, &new_side_paths)?,
         )
@@ -460,7 +443,7 @@ impl DiffSources {
 
     /// Metric 1 is new against the full old tree; metric 2 is new minus
     /// old, each against the neutral remainder.
-    pub fn passes<'a>(&'a self, scorer: &'a Scorer) -> [Attribution<'a>; 3] {
+    fn passes<'a>(&'a self, scorer: &'a Scorer) -> [Attribution<'a>; 3] {
         let tree: Vec<&[u8]> = self.tree.iter().map(|(_, code)| code.as_slice()).collect();
         let remainder: Vec<&[u8]> = self
             .tree
@@ -477,19 +460,19 @@ impl DiffSources {
         ]
     }
 
-    pub fn report(
-        self,
-        scorer: &Scorer,
-        [review, delta_new, delta_old]: [Vec<u64>; 3],
-    ) -> DiffReport {
+    fn report(self, scorer: &Scorer, [review, delta_new, delta_old]: [Vec<u64>; 3]) -> DiffReport {
         let mut files = Vec::with_capacity(self.items.len());
         for (i, item) in self.items.iter().enumerate() {
             let new_lines = lines(&item.new);
+            let (added_lines, deleted_lines) =
+                self.churn.get(&item.path).copied().unwrap_or_default();
             files.push(DiffFile {
                 path: item.path.clone(),
                 status: item.status.clone(),
                 review_bytes: review[i],
                 delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
+                added_lines,
+                deleted_lines,
                 new_lines,
                 bytes_per_line: (item.status == Status::Added && new_lines > 0)
                     .then(|| review[i] as f64 / new_lines as f64),
@@ -499,12 +482,6 @@ impl DiffSources {
         flag_density_outliers(&mut files);
         files.sort_by_key(|f| Reverse(f.review_bytes));
 
-        let (added_lines, deleted_lines) = self
-            .items
-            .iter()
-            .filter_map(|item| self.churn.get(&item.path))
-            .fold((0, 0), |(a, d), (added, deleted)| (a + added, d + deleted));
-
         DiffReport {
             version: VersionInfo::for_scorer(scorer),
             base: self.base,
@@ -512,8 +489,8 @@ impl DiffSources {
             totals: Totals {
                 review_bytes: files.iter().map(|f| f.review_bytes).sum(),
                 delta_bytes: files.iter().map(|f| f.delta_bytes).sum(),
-                added_lines,
-                deleted_lines,
+                added_lines: files.iter().map(|f| f.added_lines).sum(),
+                deleted_lines: files.iter().map(|f| f.deleted_lines).sum(),
             },
             files,
             skipped: self.skipped,
@@ -521,14 +498,19 @@ impl DiffSources {
     }
 }
 
-pub fn diff(git: &Git, opts: &DiffOptions, progress: Progress) -> Result<DiffReport> {
-    let sources = DiffSources::fetch(git, opts)?;
+pub fn diff(
+    git: &Git,
+    base: Option<&str>,
+    opts: &Options,
+    progress: Progress,
+) -> Result<DiffReport> {
+    let sources = DiffSources::fetch(git, base, opts)?;
     let scorer = Scorer::default();
     let scores = score("diff", sources.passes(&scorer), progress);
     Ok(sources.report(&scorer, scores))
 }
 
-pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport> {
+pub fn abs(git: &Git, opts: &Options, progress: Progress) -> Result<AbsReport> {
     let sources = AbsSources::fetch(git, opts)?;
     let scorer = Scorer::default();
     let scores = score("C(tree)", sources.passes(&scorer), progress);
@@ -538,17 +520,22 @@ pub fn abs(git: &Git, opts: &AbsOptions, progress: Progress) -> Result<AbsReport
 /// Both views at once. Their four passes are independent streams, so the
 /// whole invocation is one scoring batch: C(tree) no longer waits for the
 /// diff to finish, and the bar covers both.
+///
+/// The time is bought with memory. Running the views together holds both
+/// their corpora and runs four compressors at once, so this peaks at
+/// about the sum of what the two views peak at separately rather than
+/// the larger of the two.
 pub fn overview(
     git: &Git,
-    opts: &DiffOptions,
+    base: Option<&str>,
+    opts: &Options,
     progress: Progress,
 ) -> Result<(AbsReport, DiffReport)> {
-    let tree_opts = opts.tree();
     // Two independent trips to git and back; neither view waits on the
     // other to have its blobs.
     let (tree_sources, diff_sources) = std::thread::scope(|scope| {
-        let tree = scope.spawn(|| AbsSources::fetch(git, &tree_opts));
-        let diff = DiffSources::fetch(git, opts);
+        let tree = scope.spawn(|| AbsSources::fetch(git, opts));
+        let diff = DiffSources::fetch(git, base, opts);
         anyhow::Ok((tree.join().expect("fetch thread")?, diff?))
     })?;
     let scorer = Scorer::default();
@@ -577,9 +564,9 @@ fn resolve_base(git: &Git, requested: Option<&str>) -> Result<String> {
     bail!("no main/master branch found; pass --base <ref>")
 }
 
-/// Layer 5 of the filter stack: flag (never drop) files whose density is
-/// far off this run's median — probable generated/vendored content that
-/// no pattern anticipated.
+/// The filter stack's density backstop: flag (never drop) files whose
+/// density is far off this run's median — probable generated/vendored
+/// content that no pattern anticipated.
 fn flag_density_outliers(files: &mut [DiffFile]) {
     let mut densities: Vec<f64> = files
         .iter()

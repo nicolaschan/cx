@@ -3,8 +3,9 @@
 //! 2. binary detection on content (UTF-16/32 aware)
 //! 3. ported linguist generated/vendored patterns
 //! 4. prose, unless `--prose` asks to keep it
-//! 5. test files, unless `--include-tests` asks to keep them
-//! 6. `.cxignore`
+//! 5. data files, unless `--data` asks to keep them
+//! 6. test files, unless `--include-tests` asks to keep them
+//! 7. `.cxignore`
 //!
 //! The density backstop (in the report, not here) flags, it doesn't drop.
 
@@ -80,6 +81,17 @@ const PROSE_FILENAMES: [&str; 8] = [
     "CONTRIBUTORS",
 ];
 
+/// Data formats, by extension — the sole route to them: tokei's
+/// serialized-data languages (JSON, XML, SVG) have no filename or
+/// shebang entries, and the tabular and line-delimited formats have no
+/// tokei language at all. Config (YAML, TOML) and markup (HTML, CSS)
+/// stay code — they are authored, not emitted — as does a language that
+/// merely compiles *to* data (Jsonnet). SVG is an image that happens to
+/// be text.
+const DATA_EXTENSIONS: [&str; 8] = [
+    "json", "xml", "svg", "csv", "tsv", "jsonl", "ndjson", "geojson",
+];
+
 /// Whether a blob is a prose document: a prose language by tokei's
 /// table, or — only when no language is found at all, so `LICENSE.py`
 /// is Python — a conventional extensionless document.
@@ -92,6 +104,14 @@ fn is_prose(path: &str, content: &[u8]) -> bool {
             PROSE_FILENAMES.iter().any(|n| stem.eq_ignore_ascii_case(n))
         }
     }
+}
+
+/// Whether a blob is serialized data rather than authored logic, by the
+/// extension after the path's last dot. No data extension contains `/`,
+/// so a dot inside a directory name can never match.
+fn is_data(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| DATA_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
 }
 
 /// Whether a path names a test, by convention alone — no language, build
@@ -119,6 +139,7 @@ pub struct Filter {
     patterns: GlobSet,
     include_tests: bool,
     prose: bool,
+    data: bool,
     cxignore: Option<Gitignore>,
 }
 
@@ -138,6 +159,7 @@ impl Filter {
         attrs: HashMap<String, LinguistAttrs>,
         include_tests: bool,
         prose: bool,
+        data: bool,
     ) -> Result<Self> {
         let cxignore_path = root.join(".cxignore");
         let cxignore = cxignore_path.exists().then(|| {
@@ -150,6 +172,7 @@ impl Filter {
             patterns: glob_set(&LINGUIST_PATTERNS)?,
             include_tests,
             prose,
+            data,
             cxignore: cxignore.transpose()?,
         })
     }
@@ -177,6 +200,9 @@ impl Filter {
         if !self.prose && is_prose(path, content) {
             return Some("prose");
         }
+        if !self.data && is_data(path) {
+            return Some("data");
+        }
         if !self.include_tests && is_test_path(path) {
             return Some("test");
         }
@@ -193,9 +219,16 @@ impl Filter {
 mod tests {
     use super::*;
 
-    /// The default filter: tests excluded.
+    /// The default filter: tests, prose, and data excluded.
     fn filter() -> Filter {
-        Filter::new(Path::new("/nonexistent"), HashMap::new(), false, false).unwrap()
+        Filter::new(
+            Path::new("/nonexistent"),
+            HashMap::new(),
+            false,
+            false,
+            false,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -243,7 +276,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let f = Filter::new(Path::new("/nonexistent"), attrs, false, false).unwrap();
+        let f = Filter::new(Path::new("/nonexistent"), attrs, false, false, false).unwrap();
         assert_eq!(
             f.exclusion("src/schema.rs", b"code"),
             Some("linguist-generated")
@@ -259,8 +292,14 @@ mod tests {
 
     #[test]
     fn drops_tests_unless_asked_to_include_them() {
-        let including =
-            Filter::new(Path::new("/nonexistent"), HashMap::new(), true, false).unwrap();
+        let including = Filter::new(
+            Path::new("/nonexistent"),
+            HashMap::new(),
+            true,
+            false,
+            false,
+        )
+        .unwrap();
         for path in ["tests/e2e.rs", "src/parser_test.go", "web/app.spec.ts"] {
             assert_eq!(filter().exclusion(path, b"code"), Some("test"), "{path}");
             assert_eq!(including.exclusion(path, b"code"), None, "{path} included");
@@ -283,7 +322,7 @@ mod tests {
             ("spec/models/user_spec.rb", true),
             ("src/__tests__/button.tsx", true),
             ("src/__mocks__/fs.js", true),
-            ("pkg/testdata/sample.json", true),
+            ("pkg/testdata/fixture.rs", true),
             ("Tests/Legacy.cs", true),
             // Test words as whole filename segments.
             ("src/parser_test.go", true),
@@ -318,7 +357,8 @@ mod tests {
     }
 
     /// Prose is what tokei types as such plus the conventional
-    /// extensionless documents; data and markup are code.
+    /// extensionless documents; config and markup are code, and data
+    /// has its own layer.
     #[test]
     fn skips_prose_unless_asked_to_keep_it() {
         let f = filter();
@@ -345,7 +385,6 @@ mod tests {
         }
         for path in [
             "ci.yaml",
-            "package.json",
             "index.html",
             "Cargo.toml",
             "style.css",
@@ -357,9 +396,76 @@ mod tests {
             assert_eq!(f.exclusion(path, b"code"), None, "{path}");
         }
 
-        let keep = Filter::new(Path::new("/nonexistent"), HashMap::new(), false, true).unwrap();
+        let keep = Filter::new(
+            Path::new("/nonexistent"),
+            HashMap::new(),
+            false,
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(keep.exclusion("README.md", b"words"), None);
         assert_eq!(keep.exclusion("LICENSE", b"words"), None);
+    }
+
+    /// Data files — serialized data, not authored logic — leave the
+    /// universe like prose does: JSON, XML, SVG by tokei's table, plus
+    /// the tabular and line-delimited formats tokei has no language for.
+    #[test]
+    fn skips_data_files_unless_asked_to_keep_them() {
+        let f = filter();
+        for path in [
+            "package.json",
+            "tsconfig.json",
+            "rows.csv",
+            "data/rows.tsv",
+            "events.jsonl",
+            "events.ndjson",
+            "map.geojson",
+            "pom.xml",
+            "logo.svg",
+            // The extension is case-insensitive and must be the file's
+            // own: a dot inside a directory name never matches, because
+            // no data extension contains a slash.
+            "export/ROWS.CSV",
+            "dir.v1/rows.csv",
+        ] {
+            assert_eq!(f.exclusion(path, b"data"), Some("data"), "{path}");
+        }
+        // Config and markup stay code, so does a language that merely
+        // compiles *to* data, and so does a file under a directory whose
+        // name ends in a data extension.
+        for path in [
+            "ci.yaml",
+            "Cargo.toml",
+            "index.html",
+            "style.css",
+            "conf.jsonnet",
+            "data.json/notes.rs",
+            "data.json/Makefile",
+        ] {
+            assert_eq!(f.exclusion(path, b"code"), None, "{path}");
+        }
+        let keep = Filter::new(
+            Path::new("/nonexistent"),
+            HashMap::new(),
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(keep.exclusion("package.json", b"data"), None);
+        assert_eq!(keep.exclusion("rows.csv", b"data"), None);
+    }
+
+    /// A data file in a test directory is data first, mirroring prose:
+    /// what a file is precedes where it lives.
+    #[test]
+    fn data_is_recognised_before_tests() {
+        assert_eq!(
+            filter().exclusion("pkg/testdata/sample.json", b"{}"),
+            Some("data")
+        );
     }
 
     /// A prose document about tests is prose first (prose precedes the
