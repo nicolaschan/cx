@@ -2,7 +2,7 @@
 //! the two references, run the three metric passes.
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Result, bail};
 use cx_core::Scorer;
@@ -34,7 +34,7 @@ pub struct Options {
     /// like prose.
     pub data: bool,
     /// Restrict the run to the paths these globs select — see [`Scope`].
-    /// Empty is the whole repository.
+    /// Empty is everything the run is rooted at.
     pub globs: Vec<String>,
 }
 
@@ -68,6 +68,26 @@ impl VersionInfo {
             zstd: cx_core::zstd_version(),
             level: scorer.level(),
             max_window_log: scorer.max_window_log(),
+        }
+    }
+}
+
+/// What every report says about the run behind it, whatever that run
+/// measured — stated once, so no view can describe itself two ways.
+#[derive(Serialize)]
+pub struct Run {
+    pub version: VersionInfo,
+    /// Where this run was rooted, relative to the repository root:
+    /// empty at the root itself. Every path a report names is written
+    /// from here.
+    pub root: String,
+}
+
+impl Run {
+    fn new(git: &Git, scorer: &Scorer) -> Self {
+        Run {
+            version: VersionInfo::for_scorer(scorer),
+            root: git.prefix().to_owned(),
         }
     }
 }
@@ -152,7 +172,8 @@ fn code(prepared: Option<&Prepared>) -> Option<&[u8]> {
 
 #[derive(Serialize)]
 pub struct DiffReport {
-    pub version: VersionInfo,
+    #[serde(flatten)]
+    pub run: Run,
     pub base: String,
     pub merge_base: String,
     pub files: Vec<DiffFile>,
@@ -171,7 +192,8 @@ pub struct AbsFile {
 
 #[derive(Serialize)]
 pub struct AbsReport {
-    pub version: VersionInfo,
+    #[serde(flatten)]
+    pub run: Run,
     pub snapshot: &'static str,
     pub file_count: usize,
     pub raw_bytes: u64,
@@ -180,6 +202,9 @@ pub struct AbsReport {
 }
 
 /// One changed file with whichever sides exist and passed the filter.
+/// Its path is still the repository's — that is the name git keys
+/// blobs and churn by. The run's own name goes on where the report is
+/// built.
 struct Item<'a> {
     path: String,
     status: Status,
@@ -209,9 +234,26 @@ pub fn diff(
     // Scoping happens on the raw listings, before a blob is fetched: an
     // out-of-scope path is not in the reference, not scored, and not
     // skipped — it is simply not part of this run's repository.
-    let scope = Scope::new(git.root(), &opts.globs)?;
-    let mut changes = git.changes(&merge_base, opts.side)?;
-    changes.retain(|c| scope.allows(&c.path));
+    let scope = Scope::new(git.root(), git.prefix(), &opts.globs)?;
+    let repo_wide = git.changes(&merge_base, opts.side, None)?;
+    let touched: BTreeSet<&str> = repo_wide
+        .iter()
+        .flat_map(|change| {
+            let from = match &change.status {
+                Status::Renamed { from } => Some(from.as_str()),
+                _ => None,
+            };
+            [Some(change.path.as_str()), from]
+        })
+        .flatten()
+        .filter(|path| scope.allows(path))
+        .collect();
+    // Asked about exactly the files this run holds, git answers in the
+    // run's own frame — a file arriving from outside is the add it is
+    // here, one leaving is a delete, and the churn is theirs — which is
+    // the report a repository of only these files would give.
+    let changed: Vec<&str> = touched.iter().copied().collect();
+    let changes = git.changes(&merge_base, opts.side, Some(&changed))?;
     let mut tree_paths = git.ls_tree(&merge_base)?;
     tree_paths.retain(|p| scope.allows(p));
     let tree_refs: Vec<&str> = tree_paths.iter().map(String::as_str).collect();
@@ -258,16 +300,11 @@ pub fn diff(
     // flipped binary→text is skipped whole rather than half-scored).
     let mut items: Vec<Item> = Vec::new();
     let mut skipped: Vec<Skipped> = Vec::new();
-    let mut touched: HashSet<&str> = HashSet::new();
     for change in &changes {
-        touched.insert(change.path.as_str());
         let old_path = match &change.status {
             Status::Added => None,
             Status::Modified | Status::Deleted => Some(change.path.as_str()),
-            Status::Renamed { from } => {
-                touched.insert(from.as_str());
-                Some(from.as_str())
-            }
+            Status::Renamed { from } => Some(from.as_str()),
         };
         let old = old_path.and_then(|p| old_tree.get(p));
         let new = (change.status != Status::Deleted)
@@ -279,7 +316,7 @@ pub fn diff(
             .find_map(|b| b.as_ref().err())
         {
             skipped.push(Skipped {
-                path: change.path.clone(),
+                path: scope.name(&change.path),
                 reason: (*reason).to_owned(),
             });
             continue;
@@ -323,29 +360,35 @@ pub fn diff(
             .map(|stream| stream.join().expect("stream thread"))
     });
 
-    let churn = git.line_counts(&merge_base, opts.side)?;
+    let churn = git.line_counts(&merge_base, opts.side, Some(&changed))?;
     let mut files = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let new_lines = lines(new_items[i]);
         let (added_lines, deleted_lines) = churn.get(&item.path).copied().unwrap_or_default();
+        let status = match &item.status {
+            Status::Renamed { from } => Status::Renamed {
+                from: scope.name(from),
+            },
+            status => status.clone(),
+        };
         files.push(DiffFile {
-            path: item.path.clone(),
-            status: item.status.clone(),
+            path: scope.name(&item.path),
             review_bytes: review[i],
             delta_bytes: delta_new[i] as i64 - delta_old[i] as i64,
             added_lines,
             deleted_lines,
             new_lines,
-            bytes_per_line: (item.status == Status::Added && new_lines > 0)
+            bytes_per_line: (status == Status::Added && new_lines > 0)
                 .then(|| review[i] as f64 / new_lines as f64),
             density_outlier: false,
+            status,
         });
     }
     flag_density_outliers(&mut files);
     files.sort_by_key(|f| Reverse(f.review_bytes));
 
     Ok(DiffReport {
-        version: VersionInfo::for_scorer(&scorer),
+        run: Run::new(git, &scorer),
         base,
         merge_base,
         totals: Totals {
@@ -362,7 +405,7 @@ pub fn diff(
 pub fn abs(git: &Git, opts: &Options, progress: Progress) -> Result<AbsReport> {
     // Scoped before the blobs are fetched: out of scope is out of the
     // repository, as far as this run is concerned.
-    let scope = Scope::new(git.root(), &opts.globs)?;
+    let scope = Scope::new(git.root(), git.prefix(), &opts.globs)?;
     let mut paths = git.list(opts.side)?;
     paths.retain(|p| scope.allows(p));
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
@@ -388,7 +431,7 @@ pub fn abs(git: &Git, opts: &Options, progress: Progress) -> Result<AbsReport> {
         .iter()
         .zip(&scores)
         .map(|((path, content), &bytes)| AbsFile {
-            path: (*path).to_owned(),
+            path: scope.name(path),
             bytes,
             lines: lines(content),
         })
@@ -396,7 +439,7 @@ pub fn abs(git: &Git, opts: &Options, progress: Progress) -> Result<AbsReport> {
     files.sort_by_key(|f| Reverse(f.bytes));
 
     Ok(AbsReport {
-        version: VersionInfo::for_scorer(&scorer),
+        run: Run::new(git, &scorer),
         snapshot: opts.side.label(),
         file_count: kept.len(),
         raw_bytes: pass.bytes(),

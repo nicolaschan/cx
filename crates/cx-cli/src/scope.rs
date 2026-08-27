@@ -1,5 +1,6 @@
-//! Which paths cx is asked to look at — the `--glob` selection, applied
-//! to path lists before a single blob is fetched.
+//! Which paths cx is asked to look at — where the run is rooted and the
+//! `--glob` selection, applied to path lists before a single blob is
+//! fetched.
 //!
 //! Distinct from [`crate::filter`], which decides whether a file cx *is*
 //! looking at holds scorable code and says why when it doesn't. A path
@@ -11,21 +12,34 @@ use std::path::Path;
 use anyhow::Result;
 use ignore::overrides::{Override, OverrideBuilder};
 
-pub struct Scope(Override);
+pub struct Scope {
+    /// Where the run is rooted, relative to the repository root: empty
+    /// at the root, otherwise a directory with its trailing slash, so
+    /// that stripping it from a path both tests and performs the move
+    /// into the run's own frame.
+    prefix: String,
+    globs: Override,
+}
 
 impl Scope {
-    /// Gitignore glob syntax, with `!` excluding and the last matching
-    /// glob winning — `ignore`'s override matcher, which is ripgrep's
-    /// `-g`. No globs admits every path.
-    pub fn new(root: &Path, globs: &[String]) -> Result<Self> {
-        let mut builder = OverrideBuilder::new(root);
+    /// A run rooted at `prefix` — the repo-relative directory cx was run
+    /// from — selecting within it by gitignore glob syntax, with `!`
+    /// excluding and the last matching glob winning: `ignore`'s override
+    /// matcher, which is ripgrep's `-g`. Globs read from `prefix`, like
+    /// every other path a run names. No globs admits the whole subtree.
+    pub fn new(repo: &Path, prefix: &str, globs: &[String]) -> Result<Self> {
+        let mut builder = OverrideBuilder::new(repo.join(prefix));
         for glob in globs {
             builder.add(glob)?;
         }
-        Ok(Scope(builder.build()?))
+        Ok(Scope {
+            prefix: prefix.to_owned(),
+            globs: builder.build()?,
+        })
     }
 
-    /// Whether a repo-relative path is in scope.
+    /// Whether a repo-relative path is part of this run: inside the
+    /// directory it is rooted at, and selected by the globs there.
     ///
     /// Each enclosing directory is consulted before the file, outermost
     /// first, exactly as a walk of the tree would reach them: an exclude
@@ -39,10 +53,13 @@ impl Scope {
     /// that is what keeps `Override` from reporting its
     /// no-include-matched verdict as an exclude of its own.
     pub fn allows(&self, path: &str) -> bool {
+        let Some(path) = path.strip_prefix(&self.prefix) else {
+            return false;
+        };
         let dirs = path.match_indices('/').map(|(end, _)| &path[..end]);
-        let mut opened = self.0.num_whitelists() == 0;
+        let mut opened = self.globs.num_whitelists() == 0;
         for candidate in dirs.chain([path]) {
-            let verdict = self.0.matched(candidate, true);
+            let verdict = self.globs.matched(candidate, true);
             if verdict.is_ignore() {
                 return false;
             }
@@ -50,15 +67,27 @@ impl Scope {
         }
         opened
     }
+
+    /// The name this run gives a repo-relative path: relative to the
+    /// directory the run is rooted at, which is how every path it
+    /// reports is written. Paths it never looked at keep the name they
+    /// have in the repository.
+    pub fn name(&self, path: &str) -> String {
+        path.strip_prefix(&self.prefix).unwrap_or(path).to_owned()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn scope(globs: &[&str]) -> Scope {
+    fn rooted(prefix: &str, globs: &[&str]) -> Scope {
         let globs: Vec<String> = globs.iter().map(|g| (*g).to_owned()).collect();
-        Scope::new(Path::new("/repo"), &globs).unwrap()
+        Scope::new(Path::new("/repo"), prefix, &globs).unwrap()
+    }
+
+    fn scope(globs: &[&str]) -> Scope {
+        rooted("", globs)
     }
 
     /// Each row is a scope and the verdict it gives every path — the
@@ -115,8 +144,52 @@ mod tests {
         }
     }
 
+    /// A run rooted below the repository root sees that subtree and
+    /// nothing else, and reads its globs from where it stands.
+    #[test]
+    fn a_run_below_the_root_sees_only_its_own_subtree() {
+        for (prefix, globs, path, allowed) in [
+            // The prefix alone selects, as `-g 'sub/**'` would.
+            ("sub/", &[][..], "sub/main.rs", true),
+            ("sub/", &[][..], "other/lib.rs", false),
+            ("sub/", &[][..], "README.md", false),
+            // A sibling that merely starts the same way is not inside,
+            // however deep the directory the run was started in.
+            ("sub/", &[][..], "subtle/x.rs", false),
+            ("crates/cli/", &[][..], "crates/cli/main.rs", true),
+            ("crates/cli/", &[][..], "crates/climate/x.rs", false),
+            // Globs read from where the run stands, not from the root.
+            ("sub/", &["src/**"][..], "sub/src/main.rs", true),
+            ("sub/", &["src/**"][..], "sub/build.rs", false),
+            ("sub/", &["*.rs"][..], "sub/src/main.rs", true),
+            ("sub/", &["!src/**"][..], "sub/src/main.rs", false),
+            ("sub/", &["!src/**"][..], "sub/build.rs", true),
+            // Which is why a glob anchored at the repository root names
+            // nothing: the path it describes is not inside this run.
+            ("sub/", &["sub/**"][..], "sub/src/main.rs", false),
+        ] {
+            assert_eq!(
+                rooted(prefix, globs).allows(path),
+                allowed,
+                "{prefix:?} {globs:?} on {path}"
+            );
+        }
+    }
+
+    /// What the run calls a path: relative to where it is rooted, so a
+    /// run at the repo root names paths exactly as git does.
+    #[test]
+    fn names_paths_relative_to_where_the_run_is_rooted() {
+        let cli = rooted("crates/cx-cli/", &[]);
+        assert_eq!(cli.name("crates/cx-cli/src/main.rs"), "src/main.rs");
+        assert_eq!(
+            scope(&[]).name("crates/cx-cli/src/main.rs"),
+            "crates/cx-cli/src/main.rs"
+        );
+    }
+
     #[test]
     fn rejects_an_unparsable_glob() {
-        assert!(Scope::new(Path::new("/repo"), &["src/[".to_owned()]).is_err());
+        assert!(Scope::new(Path::new("/repo"), "", &["src/[".to_owned()]).is_err());
     }
 }

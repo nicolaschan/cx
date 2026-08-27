@@ -75,10 +75,22 @@ variable backs each flag.
 
 ## Scoping to part of a repo
 
-`-g/--glob` restricts a run to the paths it selects — gitignore syntax,
-`!` to exclude, repeatable, and among globs the last match wins. Same
-spelling as ripgrep's `-g` and as a `.cxignore` line, because it is the
-same matcher underneath.
+**Where you run cx is what cx measures.** A run inside a subdirectory
+sizes that subtree as its own codebase and names its files from there,
+exactly as `-g 'that/subdirectory/**'` would from the root. `cd` to the
+repository root for the whole-repo number.
+
+```console
+$ cd crates/cx-cli && cx       # this subsystem's C(tree) and ΔCX, its own paths
+```
+
+`-g/--glob` narrows a run further — gitignore syntax, `!` to exclude,
+repeatable, and among globs the last match wins. Same spelling as
+ripgrep's `-g` and as a `.cxignore` line, because it is the same matcher
+underneath, but read from a different place: a glob reads from the
+directory cx runs in, like every path it prints, while `.cxignore` is the
+repository's own file and names paths from the repository root wherever
+you run.
 
 ```console
 $ cx abs -g 'crates/cx-cli/**'          # size one subsystem
@@ -86,14 +98,20 @@ $ cx -g '!**/generated/**'              # leave a directory out of the diff
 $ cx abs -g 'src/**' -g '!src/legacy/**'
 ```
 
-What the globs select is scored **as if it were the whole repository**: a
-path outside the scope is in no reference and no scoring pass, and does
-not appear in the skipped list either — cx never looked at it. So
-`cx abs -g 'crates/api/**'` gives that subtree's own `C(tree)`, the same
-number a repo containing only `crates/api` would report, and on a large
-repository cx never fetches the rest. Subtree scores do not add up to the
-whole: the repo-wide number charges shared patterns once, which is the
-point of the metric.
+What a run selects — by where it stands, by its globs, or both — is
+scored **as if it were the whole repository**: a path outside the scope
+is in no reference and no scoring pass, and does not appear in the
+skipped list either — cx never looked at it. So `cx abs -g 'crates/api/**'`
+gives that subtree's own `C(tree)`, the same number a repo containing
+only `crates/api` would report, and on a large repository cx never
+fetches the rest. Subtree scores do not add up to the whole: the
+repo-wide number charges shared patterns once, which is the point of the
+metric.
+
+A file that arrives from outside the scope counts as an add rather than a
+rename, and one that leaves counts as a delete: the other end of the move
+is not part of this codebase, which is how the score already reads it.
+`-v` names the directory a run is rooted in, below the summary.
 
 Directories work as they do in gitignore. `-g '!target'` prunes that
 subtree without a `target/**`, and — as in gitignore — nothing inside an
