@@ -9,7 +9,7 @@ use std::process::Command;
 use cx_cli::git::{Git, Side, Status};
 use cx_cli::pipeline::{self, Options};
 use cx_cli::progress::Progress;
-use cx_cli::report::{Options, render_diff, render_overview};
+use cx_cli::report::{self, render_diff, render_overview};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -1158,7 +1158,7 @@ fn an_excluding_glob_drops_just_its_matches() {
 #[test]
 fn diff_lines_column_reports_signed_net_churn() {
     let (_dir, git) = setup();
-    let opts = Options {
+    let opts = report::Options {
         top: 30,
         files: true,
         verbose: false,
@@ -1166,7 +1166,8 @@ fn diff_lines_column_reports_signed_net_churn() {
     };
     let diff = pipeline::diff(
         &git,
-        &DiffOptions {
+        None,
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
@@ -1186,7 +1187,7 @@ fn diff_lines_column_reports_signed_net_churn() {
 
     let abs = pipeline::abs(
         &git,
-        &AbsOptions {
+        &Options {
             side: Side::Head,
             ..Default::default()
         },
