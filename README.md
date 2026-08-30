@@ -1,22 +1,22 @@
 # cx
 
-Score git diffs by **marginal description length**: how much new information
-a change adds, conditioned on what the codebase already contains. The
-estimator is one zstd stream, the codebase then the change —
-language-independent,
-grounded in MDL / the software-naturalness literature (Hindle et al. 2012;
-Ray et al. 2016).
+cx scores git diffs by how much new information they add to the codebase.
 
-Two independent axes per file, one PR total:
+The idea comes from minimum description length: code that repeats existing
+patterns is cheap, and code that introduces new ideas is expensive. To
+measure this, cx compresses the codebase first and the change second, in
+one zstd stream. The compressed size of the change is its score. This
+works for any language (Hindle et al. 2012; Ray et al. 2016).
 
-- **REVIEW** — `C(new | old tree)`: what a reviewer who knows the codebase
-  must newly absorb. Repo-conventional plumbing compresses to ≈ 0 even when
-  it spans hundreds of lines; a dense 60-line contract change does not.
-- **ΔCX** — `C(new | remainder) − C(old | remainder)`, where the
-  remainder is the tree minus all touched content: how much complexity the
-  change adds to (or refunds from) the codebase. A full rewrite of equal
-  intrinsic complexity scores REVIEW high, ΔCX ≈ 0. Deleting one of N
-  duplicated copies refunds ≈ 0; deleting unique content refunds in full.
+Each file gets two scores:
+
+- **REVIEW** — how much a reviewer who knows the codebase must newly
+  absorb. Plumbing that follows repo conventions compresses to ≈ 0, even
+  across hundreds of lines. A dense 60-line contract change does not.
+- **ΔCX** — how much complexity the change adds to the codebase, or
+  removes from it. A full rewrite scores high on REVIEW but ≈ 0 on ΔCX.
+  Deleting one copy of duplicated code refunds ≈ 0. Deleting unique code
+  refunds in full.
 
 ```console
 $ cx diff
@@ -31,28 +31,14 @@ $ cx diff
  review 4.4 KB   ΔCX +3.9 KB   lines +1059 −531   1 skipped
 ```
 
-The `+`/`−`/`→` column marks added, deleted, and renamed files (`⚠` for
-density outliers).
+The `+`/`−`/`→` column marks added, deleted, and renamed files. `⚠` marks
+a density outlier, which is probably generated content. LINES is net
+churn. `--verbose` shows what was skipped and why.
 
-LINES is net churn: added − deleted, so a file that shrank reads `−431`.
-`cx abs` shows the same column as an absolute count, because its bytes
-measure the tree rather than the change.
-
-The footer is colored on the same magnitude scale as the cells above,
-except the line churn — the familiar size the others are read against,
-not a verdict of its own. Those counts are git's `--numstat` minus
-whatever cx skipped. `--verbose` adds the rest:
-
-```console
-$ cx --verbose
- C(tree) 23.4 KB   review 4.4 KB   ΔCX +3.9 KB   lines +1059 −531   1 skipped
- C(tree) over 23 files (83.7 KB raw)
- skipped: Cargo.lock (generated/vendored pattern)
- zstd 1.5.7, level 19, window≤2^31
-```
+## Usage
 
 ```
-cx       [-n <N>] [--base <ref>]  # overview: one merged table — tree breakdown plus the diff's ΔCX per path
+cx       [-n <N>] [--base <ref>]  # tree breakdown plus the diff's ΔCX per path
 cx diff  [-n <N>] [--base <ref>]  # just the diff, sized by review cost
 cx abs   [-n <N>]                 # absolute C(tree): the trend-line number
 
@@ -61,107 +47,56 @@ cx abs   [-n <N>]                 # absolute C(tree): the trend-line number
 #                   [--include-tests] [--json]
 ```
 
-Every view scores the **working tree** by default — staged and unstaged
-changes, plus untracked files that aren't ignored. `--staged` scores the
-index; `--committed` scores HEAD. `abs` takes the same choice — `C(tree)`
-and `ΔCX` describe the same snapshot.
+By default, every view scores the **working tree**: staged changes,
+unstaged changes, and untracked files. `--staged` scores the index
+instead. `--committed` scores HEAD.
 
-Defaults can be pinned through the environment — `CX_COMMENTS=1`,
-`CX_STRINGS=1`, `CX_PROSE=1`, `CX_DATA=1`, `CX_INCLUDE_TESTS=1`,
-`CX_TOP=15`, `CX_BASE=develop`,
-`CX_GLOB='src/**'` — and any single run can still override them on the
-command line (`--comments=false`, `-n 50`). `cx --help` lists which
-variable backs each flag.
+`-g/--glob` limits a run to matching paths. It uses gitignore syntax:
+`!` excludes, the flag repeats, and the last match wins. cx scores the
+selection as if it were the whole repository. So `cx abs -g
+'crates/api/**'` reports the same number as a repo that contains only
+`crates/api`.
 
-## Scoping to part of a repo
+Every flag has a matching environment variable, like `CX_COMMENTS=1` or
+`CX_BASE=develop`. Flags on the command line override them. `cx --help`
+lists the pairs.
 
-`-g/--glob` restricts a run to the paths it selects — gitignore syntax,
-`!` to exclude, repeatable, and among globs the last match wins. Same
-spelling as ripgrep's `-g` and as a `.cxignore` line, because it is the
-same matcher underneath.
+`--json` prints the full report. It is the stable contract for tooling.
 
-```console
-$ cx abs -g 'crates/cx-cli/**'          # size one subsystem
-$ cx -g '!**/generated/**'              # leave a directory out of the diff
-$ cx abs -g 'src/**' -g '!src/legacy/**'
-```
+## What gets scored
 
-What the globs select is scored **as if it were the whole repository**: a
-path outside the scope is in no reference and no scoring pass, and does
-not appear in the skipped list either — cx never looked at it. So
-`cx abs -g 'crates/api/**'` gives that subtree's own `C(tree)`, the same
-number a repo containing only `crates/api` would report, and on a large
-repository cx never fetches the rest. Subtree scores do not add up to the
-whole: the repo-wide number charges shared patterns once, which is the
-point of the metric.
+cx scores **code**, not text. Before compressing a file, it strips
+comments, empties string literals, and drops blank lines. It uses
+[tokei](https://github.com/XAMPPRocky/tokei)'s syntax tables to do this
+for each language. As a result, a change that only rewords comments or
+strings scores ≈ 0. Use `--comments` or `--strings` to score those parts
+too.
 
-Directories work as they do in gitignore. `-g '!target'` prunes that
-subtree without a `target/**`, and — as in gitignore — nothing inside an
-excluded directory can be added back, so carve out with a narrower
-exclude (`-g '!vendor/lib/**'`) rather than excluding the parent.
+Three kinds of files are skipped entirely. Each has a flag to opt back
+in:
 
-The tree breakdown is dust-style: contributions aggregate up the
-directory tree, only the `-n` globally biggest files/directories are
-shown (default 30), and everything pruned collapses into a per-directory
-`… +N more` row — so the view stays one screen even on repos with
-thousands of files. `--no-files` suppresses the breakdown. Output
-colorizes on a terminal and degrades to plain text when piped; a progress
-bar on stderr tracks the run while it is a terminal.
+- **Prose**: Markdown, plain text, and documents like `LICENSE`. Flag:
+  `--prose`.
+- **Data**: JSON, XML, SVG, CSV, and similar. Config and markup (YAML,
+  TOML, HTML, CSS) still count as code. Flag: `--data`.
+- **Tests**: recognised by name alone. A path is a test when one of its
+  segments is `test`, `tests`, or `spec`, or when a directory is named
+  `e2e`, `mocks`, or `testdata`. Segments split on `/`, `_`, `-`, and
+  `.`, so `foo_test.go` matches and `latest.rs` does not. Flag:
+  `--include-tests`.
 
-`--json` emits the full report (per-file scores, skipped files, totals,
-compressor version) — the stable contract for tooling.
+cx also skips binaries, files marked generated in `.gitattributes`,
+common generated or vendored patterns (lockfiles, `vendor/`, minified
+assets), and anything listed in a `.cxignore` file.
 
-The stream is flushed at every file, so a file's score is the bytes it
-adds — the chain rule: a pattern repeated across files in one PR is
-charged once, at its first occurrence, and per-file scores sum exactly to
-the total.
+Known limits, by design:
 
-cx scores **code**. Before anything is compressed, every file is reduced
-to its code: comments are stripped, string literals are emptied to their
-delimiters (the string counts, its contents do not), and blank lines are
-dropped, using [tokei](https://github.com/XAMPPRocky/tokei)'s
-per-language syntax table (line and block comment delimiters, nesting,
-string quotes — so a `//` inside a string literal opens no comment) for
-the 300-odd languages it knows; anything else passes through untouched.
-A comment-only or string-rewording change then scores ≈0 on both axes.
-`--comments` scores comments too; `--strings` scores string contents.
-
-Prose files — Markdown, reStructuredText, plain text, AsciiDoc, Org, and
-extensionless documents such as `LICENSE`, `README`, `CHANGELOG` — are
-skipped entirely. `--prose` scores them. So are data files — JSON, XML,
-SVG, and the tabular or line-delimited formats tokei has no language for
-(CSV, TSV, JSON Lines, GeoJSON); `--data` scores them. Config and markup
-(YAML, TOML, HTML, CSS) are code.
-
-Files are filtered before scoring: `.gitattributes` linguist annotations,
-binary detection, common generated/vendored patterns (lockfiles, `dist/`,
-`vendor/`, minified assets…), prose, data files, and a `.cxignore`
-(gitignore syntax).
-
-Test files go too, recognised by naming convention alone — no language,
-build system, or parser. `--include-tests` scores them anyway, for the
-runs that want the whole picture. A path is a test when any
-segment of it, split on `/`, `_`, `-`, and `.`, is `test`, `tests`, or
-`spec`, or when a *directory* segment is `e2e`, `mocks`, or `testdata`.
-So `foo_test.go`, `foo-test.js`, `foo.test.ts`, `test_foo.py`,
-`tests.rs`, and `e2e/*` are one convention in different separators,
-while `latest.rs` stays production code and a `…-e2e-design.md` stays a
-document about tests.
-
-Deliberate consequences: plural `specs/` is documentation; test support
-like `test_helpers.rs` is test code; names only one toolchain knows
-(`conftest.py`, `FooTest.java`) go undetected, since finding them means
-teaching cx one ecosystem at a time; and inline `#[cfg(test)]` needs
-hunk scoring to exclude. Density
-outliers (bytes-per-line far from the run median on added files) are
-flagged `⚠`, not dropped — probable generated content no pattern
-anticipated.
-
-Known limits, by design: scores are relative rankings within one repo and
-compressor version, not absolute cross-repo numbers; information ≠
-verification effort (twenty subtle one-bit `<`→`<=` flips score tiny); the
-reference normalizes the repo's existing sins — this measures *marginal*
-complexity against the codebase as it is.
+- Scores are relative rankings within one repo and one compressor
+  version. They do not compare across repos.
+- Information is not verification effort. Twenty subtle `<`→`<=` flips
+  score tiny but take a long time to check.
+- The current codebase is the baseline, existing sins included. cx
+  measures the complexity added on top of it.
 
 ## Run
 
@@ -170,22 +105,19 @@ nix run github:nicolaschan/cx
 docker run --rm -v "$PWD:/repo" ghcr.io/nicolaschan/cx
 ```
 
-Prebuilt binaries for Linux (x86_64, aarch64) and macOS (aarch64) are
-attached to [releases](https://github.com/nicolaschan/cx/releases); tagging
-`v*` publishes them.
+Prebuilt binaries for Linux and macOS are attached to
+[releases](https://github.com/nicolaschan/cx/releases).
 
 ## Develop
 
 ```sh
-nix develop   # shell with the pinned toolchain (rust-toolchain.toml) + rust-analyzer
+nix develop   # shell with the pinned toolchain + rust-analyzer
 cargo test
 ```
 
-Workspace layout: `crates/cx-core` is the pure scoring engine (bytes in,
-scores out — no git, no I/O; the future WASM boundary), `crates/cx-cli`
-adds git orchestration, filtering, and rendering. The Rust toolchain and
-all dependencies come in through `flake.nix` via
-[oxalica/rust-overlay](https://github.com/oxalica/rust-overlay). `nix build`
-builds the binary and runs the tests; `nix build .#docker` builds the
-container image, published multiarch by
-[publish-nix-image](https://github.com/nicolaschan/publish-nix-image).
+`crates/cx-core` is the pure scoring engine: bytes in, scores out, no git
+or I/O. `crates/cx-cli` adds git handling, filtering, and rendering.
+`nix build` builds and tests. `nix build .#docker` builds the container
+image, and
+[publish-nix-image](https://github.com/nicolaschan/publish-nix-image)
+publishes it multiarch.
